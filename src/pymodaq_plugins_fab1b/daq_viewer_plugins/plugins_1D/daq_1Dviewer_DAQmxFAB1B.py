@@ -1,44 +1,36 @@
 import numpy as np
 from pymodaq.utils.daq_utils import ThreadCommand
-from pymodaq.utils.data import DataFromPlugins, DataToExport
+from pymodaq.utils.data import DataFromPlugins, DataToExport, Axis
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
+from qtpy.QtCore import Qt, QObject, Slot, QThread, Signal
 
 from pymodaq_plugins_daqmx.hardware.national_instruments.daqmx import DAQmx, \
     Edge, ClockSettings, Counter, ClockCounter,  TriggerSettings, AIChannel
 
-from PyDAQmx import DAQmx_Val_ContSamps
+#from PyDAQmx import DAQmx_Val_ContSamps
 
 
-class DAQ_0DViewer_DAQmxFAB1B(DAQ_Viewer_base):
-    """ Instrument plugin class for a OD viewer.
-
-    This object inherits all functionalities to communicate with PyMoDAQ’s DAQ_Viewer module through inheritance via
-    DAQ_Viewer_base. It makes a bridge between the DAQ_Viewer module and the Python wrapper of a particular instrument.
-
+class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
+    """
     This is for FAB1B NI DAQ Card, used to read chopper status and other analog signals, when triggered by the camera
-
-    Attributes:
-    -----------
-    controller: object
-        The particular object that allow the communication with the hardware, in general a python wrapper around the
-         hardware library.
-
     """
     params = comon_parameters+[
-        {'title': 'Display type:', 'name': 'display', 'type': 'list', 'limits': ['0D', '1D'], 'value':'1D'},
-        {'title': 'Axis:', 'name': 'time_axis', 'type': 'list', 'limits': ['Time', 'Samples'], 'value':'Time'},
-        {'title': 'Frequency Acq. (kS):', 'name': 'frequency', 'type': 'int', 'value': 500, 'min': 0.001, 'max': 500.0},
-        {'title': 'Nsamples:', 'name': 'Nsamples', 'type': 'int', 'value': 1000, 'default': 100, 'min': 1},
-        {'title': 'AI:', 'name': 'ai_channel', 'type': 'list',
-         'limits': DAQmx.get_NIDAQ_channels(source_type='Analog_Input'),
-         'value': DAQmx.get_NIDAQ_channels(source_type='Analog_Input')[0]},
-        {'title': 'Trigger Settings:', 'name': 'trigger_settings', 'type': 'group', 'visible': True, 'children': [
-            {'title': 'Enable?:', 'name': 'enable', 'type': 'bool', 'value': True, },
-            {'title': 'Trigger Source:', 'name': 'trigger_channel', 'type': 'list',
-             'limits': DAQmx.getTriggeringSources(), 'value': DAQmx.getTriggeringSources()[0]},
-            {'title': 'Edge type:', 'name': 'edge', 'type': 'list', 'limits': Edge.names(), 'visible': True},
-            {'title': 'Level:', 'name': 'level', 'type': 'float', 'value': 1., 'visible': True}
+        {'title': 'DAQ Settings:', 'name': 'daq_settings', 'type': 'group', 'children':
+            [{'title': 'Display type:', 'name': 'display', 'type': 'list', 'limits': ['0D', '1D'], 'value':'1D'},
+            {'title': 'Axis:', 'name': 'time_axis', 'type': 'list', 'limits': ['Time', 'Samples'], 'value':'Time'},
+            {'title': 'Frequency Acq. (kHz):', 'name': 'frequency', 'type': 'int', 'value': 500, 'min': 0.001, 'max': 500.0},
+            {'title': 'Nsamples:', 'name': 'Nsamples', 'type': 'int', 'value': 1000, 'default': 100, 'min': 1},
+            {'title': 'AI:', 'name': 'ai_channel', 'type': 'list',
+             'limits': DAQmx.get_NIDAQ_channels(source_type='Analog_Input'),
+             'value': DAQmx.get_NIDAQ_channels(source_type='Analog_Input')[0]},
+            {'title': 'Trigger Settings:', 'name': 'trigger_settings', 'type': 'group', 'visible': True, 'children': [
+                {'title': 'Enable?:', 'name': 'enable', 'type': 'bool', 'value': True, },
+                {'title': 'Trigger Source:', 'name': 'trigger_channel', 'type': 'list',
+                 'limits': DAQmx.getTriggeringSources(), 'value': DAQmx.getTriggeringSources()[0]},
+                {'title': 'Edge type:', 'name': 'edge', 'type': 'list', 'limits': Edge.names(), 'visible': True},
+                {'title': 'Level:', 'name': 'level', 'type': 'float', 'value': 1., 'visible': True}
+            ]}
         ]}
     ]
 
@@ -49,7 +41,9 @@ class DAQ_0DViewer_DAQmxFAB1B(DAQ_Viewer_base):
         self.live = False
         self.Naverage = 1
         self.ind_average = 0
-        self.axis = None
+        self.x_axis = None
+        self.daqcard_data: DataToExport = None
+        self.daqcard_ready_signal = Signal()
 
     def commit_settings(self, param: Parameter):
         """Apply the consequences of a change of value in the detector settings
@@ -81,6 +75,9 @@ class DAQ_0DViewer_DAQmxFAB1B(DAQ_Viewer_base):
                                new_controller=dict(ai=DAQmx()))
         self.update_tasks()
 
+        # Connect dte signal to slot
+        self.daqcard_ready_signal.connect(self.emit_daqcard_dte)
+
         info = "Analog measurement ready"
         initialized = True
 
@@ -88,32 +85,38 @@ class DAQ_0DViewer_DAQmxFAB1B(DAQ_Viewer_base):
 
     def update_tasks(self):
         # Create channels
-        self.channels_ai = [AIChannel(name=self.settings.child('ai_channel').value(),
+        self.channels_ai = [AIChannel(name=self.settings.child('daq_settings''ai_channel').value(),
                                       source='Analog_Input', analog_type='Voltage',
                                       value_min=-10., value_max=10., termination='Diff', ),
                             ]
 
-        self.clock_settings = ClockSettings(frequency=self.settings['frequency']*1000,
-                                            Nsamples=self.settings['Nsamples'],
+        self.clock_settings = ClockSettings(frequency=self.settings['daq_settings','frequency']*1000,
+                                            Nsamples=self.settings['daq_settings','Nsamples'],
                                             repetition=self.live,)
 
         self.trigger_settings = \
-            TriggerSettings(trig_source=self.settings['trigger_settings', 'trigger_channel'],
-                            enable=self.settings['trigger_settings', 'enable'],
-                            edge=self.settings['trigger_settings', 'edge'],
-                            level=self.settings['trigger_settings', 'level'],)
+            TriggerSettings(trig_source=self.settings['daq_settings','trigger_settings', 'trigger_channel'],
+                            enable=self.settings['daq_settings','trigger_settings', 'enable'],
+                            edge=self.settings['daq_settings','trigger_settings', 'edge'],
+                            level=self.settings['daq_settings','trigger_settings', 'level'],)
 
         self.controller['ai'].update_task(self.channels_ai, self.clock_settings, trigger_settings=self.trigger_settings)
 
-        if self.settings['time_axis'] == 'Time':
-            self.axis = np.linspace(0, self.settings['Nsamples']/self.settings['frequency']*1000, num=self.settings['Nsamples'])
-        elif self.settings['time_axis'] == 'Samples':
+        if self.settings['daq_settings','time_axis'] == 'Time':
+            dt = self.settings['daq_settings','frequency']/1000
+            self.x_axis = Axis(data=np.linspace(0, self.settings['daq_settings','Nsamples'], self.settings['daq_settings','Nsamples'], endpoint=False)*dt,
+                               label='Time',
+                               units='Seconds',
+                               index=0)
+        elif self.settings['daq_settings','time_axis'] == 'Samples':
+            self.x_axis = Axis(data=np.arange(self.settings['daq_settings','Nsamples']),
+                               label='Sample',
+                               units='',
+                               index=0)
 
     def close(self):
         """Terminate the communication protocol"""
-        ## TODO for your custom plugin
-        raise NotImplemented  # when writing your own plugin remove this line
-        #  self.controller.your_method_to_terminate_the_communication()  # when writing your own plugin replace this line
+        self.controller['ai'].close()
 
     def grab_data(self, Naverage=1, **kwargs):
         """Start a grab from the detector
@@ -174,31 +177,33 @@ class DAQ_0DViewer_DAQmxFAB1B(DAQ_Viewer_base):
     def emit_data(self, data):
         channels_name = [ch.name for ch in self.channels_ai]
 
-        if self.settings.child('display').value() == '0D':
+        if self.settings.child('daq_settings''display').value() == '0D':
             data = np.mean(data, 1)
+            data_shape = 'Data0D'
+        else:
+            data_shape = 'Data1D'
 
-        #data = np.squeeze(data)
-        # print(f'shape is {data.shape}')
-        # print(data)
         if len(self.channels_ai) == 1 and data.size == 1:
             data_export = [np.array([data[0]])]
         else:
             data_export = [np.squeeze(data[ind, :]) for ind in range(len(self.channels_ai))]
 
-        # print(f'data len is {len(data_export)} and shape is {data_export[0].shape}')
-        self.data_grabed_signal.emit([DataFromPlugins(
+        self.daqcard_data = DataToExport('DAQ Card', data=[DataFromPlugins(
             name='NI AI',
             data=data_export,
-            dim=f'Data{self.settings.child("display").value()}', labels=channels_name)])
+            dim=data_shape, labels=channels_name)])
+        self.dte_ready_signal.emit()
 
+    @Slot()
+    def emit_daqcard_dte(self):
+        # This extra slot is so that when working with Andor camera, we can handle both data signals together
+        self.dte_signal.emit(self.daqcard_data)
 
     def stop(self):
         try:
             self.controller['ai'].stop()
         except:
             pass
-        ##############################
-
         return ''
 
 

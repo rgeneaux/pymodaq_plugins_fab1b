@@ -21,11 +21,6 @@ for camera in camera_list:
     camera_names_list.update({cam.get_device_info()[1]+' '+cam.get_device_info()[2]: camera})
     cam.close()
 
-from pymodaq_plugins_daqmx.hardware.national_instruments.daqmx import DAQmx, \
-    Edge, ClockSettings, Counter, ClockCounter,  TriggerSettings, AIChannel
-
-from PyDAQmx import DAQmx_Val_ContSamps
-
 
 class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
     """
@@ -69,21 +64,6 @@ class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
                 {'title': 'Show Timestamps', 'name': 'timestamps_on', 'type': 'bool', 'value': False},
                 {'title': 'Show Pump On/Off', 'name': 'pumponoff_on', 'type': 'bool', 'value': False},
             ]},
-            # {'title': 'DAQCard Settings:', 'name': 'daqcard_settings', 'type': 'group', 'children': [
-            #     {'title': 'Display type:', 'name': 'display', 'type': 'list', 'limits': ['0D', '1D'], 'value':'1D'},
-            #     {'title': 'Axis:', 'name': 'time_axis', 'type': 'list', 'limits': ['Time', 'Samples'], 'value':'Time'},
-            #     {'title': 'Frequency Acq. (kS):', 'name': 'frequency', 'type': 'int', 'value': 500, 'min': 0.001, 'max': 500.0},
-            #     {'title': 'Nsamples:', 'name': 'Nsamples', 'type': 'int', 'value': 1000, 'default': 100, 'min': 1},
-            #     {'title': 'AI:', 'name': 'ai_channel', 'type': 'list',
-            #      'limits': DAQmx.get_NIDAQ_channels(source_type='Analog_Input'),
-            #      'value': DAQmx.get_NIDAQ_channels(source_type='Analog_Input')[0]},
-            #     {'title': 'Trigger Settings:', 'name': 'trigger_settings', 'type': 'group', 'visible': True, 'children': [
-            #         {'title': 'Enable?:', 'name': 'enable', 'type': 'bool', 'value': True, },
-            #         {'title': 'Trigger Source:', 'name': 'trigger_channel', 'type': 'list',
-            #          'limits': DAQmx.getTriggeringSources(), 'value': DAQmx.getTriggeringSources()[0]},
-            #         {'title': 'Edge type:', 'name': 'edge', 'type': 'list', 'limits': Edge.names(), 'visible': True},
-            #         {'title': 'Level:', 'name': 'level', 'type': 'float', 'value': 1., 'visible': True}
-            #     ]}
             ]}
     ]
     start_waitloop = QtCore.Signal()
@@ -110,6 +90,8 @@ class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
         self.data_shape = 'Data2D'
         self.callback_thread = None
 
+        self.camera_data_ready = QtCore.Signal()
+        self.camera_data: DataToExport = None
 
     def commit_settings(self, param: Parameter):
         """Apply the consequences of a change of value in the detector settings
@@ -295,6 +277,8 @@ class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
         self.callback_thread.callback = callback
         self.callback_thread.start()
 
+        self.camera_data_ready.connect(self.emit_camera_dte)
+
     def setup_trigger(self):
         self.settings.child("camera_settings",'trigger', 'trigger_mode').setLimits(self.controller.get_attribute("TriggerMode").values)
         self.set_trigger()
@@ -460,7 +444,8 @@ class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
 
             # Emit the frame.
             if do_emit:
-                self.dte_signal.emit(DataToExport('Camera', data=dte))
+                self.camera_data = dte
+                self.camera_data_ready.emit()
 
                 if self.settings.child("camera_settings",'timing_opts', 'fps_on').value():
                     self.update_fps()
@@ -571,6 +556,10 @@ class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
                                        label='Timestamps (ms)'))
         return dte, do_emit
 
+    @Qtcore.Slot
+    def emit_camera_dte(self):
+        self.dte_signal.emit(self.camera_data)
+
     def update_fps(self):
         current_tick = perf_counter()
         frame_time = current_tick - self.last_tick
@@ -593,37 +582,6 @@ class DAQ_2DViewer_AndorFAB1B(DAQ_Viewer_base):
             scaling = 1
         self.settings.child("camera_settings",'timing_opts', 'fps').setValue(round(self.fps * scaling, 1))
         self.settings.child("camera_settings",'timing_opts', 'fps2').setValue(self.controller.get_attribute_value('FrameRate'))
-
-    def callback(self):
-        """optional asynchrone method called when the detector has finished its acquisition of data"""
-        raise NotImplementedError
-
-
-   ##############################################
-    # DAQ CARD
-   #################################################
-
-    def init_daqcard(self):
-        self.daqcontroller = dict(ai=DAQmx())
-
-        # Create channels
-        self.channels_ai = [AIChannel(name=self.settings.child("camera_settings",'ai_channel').value(),
-                                      source='Analog_Input', analog_type='Voltage',
-                                      value_min=-10., value_max=10., termination='Diff', ),
-                            ]
-
-        self.clock_settings = ClockSettings(frequency=self.settings["camera_settings",'frequency']*1000,
-                                            Nsamples=self.settings["camera_settings",'Nsamples'],
-                                            repetition=self.live,)
-
-        self.trigger_settings = \
-            TriggerSettings(trig_source=self.settings["camera_settings",'trigger_settings', 'trigger_channel'],
-                            enable=self.settings["camera_settings",'trigger_settings', 'enable'],
-                            edge=self.settings["camera_settings",'trigger_settings', 'edge'],
-                            level=self.settings["camera_settings",'trigger_settings', 'level'],)
-
-        self.controller['ai'].update_task(self.channels_ai, self.clock_settings, trigger_settings=self.trigger_settings)
-
 
 
     def close(self):
