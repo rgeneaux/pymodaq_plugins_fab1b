@@ -2,6 +2,9 @@ from pymodaq.utils.daq_utils import ThreadCommand
 from pymodaq.utils.data import DataFromPlugins, Axis, DataToExport
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
+from qtpy.QtCore import QObject, Signal, Slot
+from pymodaq.utils.parameter import utils as putils
+from qtpy import QtWidgets
 
 from daq_2Dviewer_AndorFAB1B import DAQ_2DViewer_AndorFAB1B as DAQAndor
 from ..plugins_1D.daq_1Dviewer_DAQmxFAB1B import DAQ_1DViewer_DAQmxFAB1B as DAQDaqmx
