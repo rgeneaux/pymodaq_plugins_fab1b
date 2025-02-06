@@ -4,6 +4,7 @@ from pymodaq.utils.data import DataFromPlugins, DataToExport, Axis
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
 from qtpy.QtCore import Qt, QObject, Slot, QThread, Signal
+from ctypes import c_ulong
 
 from pymodaq_plugins_daqmx.hardware.national_instruments.daqmx import DAQmx, \
     Edge, ClockSettings, Counter, ClockCounter,  TriggerSettings, AIChannel
@@ -33,6 +34,7 @@ class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
             ]}
         ]}
     ]
+    daqcard_ready_signal = Signal()
 
     def ini_attributes(self):
         self.channels_ai = None
@@ -43,7 +45,6 @@ class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
         self.ind_average = 0
         self.x_axis = None
         self.daqcard_data: DataToExport = None
-        self.daqcard_ready_signal = Signal()
 
     def commit_settings(self, param: Parameter):
         """Apply the consequences of a change of value in the detector settings
@@ -85,7 +86,7 @@ class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
 
     def update_tasks(self):
         # Create channels
-        self.channels_ai = [AIChannel(name=self.settings.child('daq_settings''ai_channel').value(),
+        self.channels_ai = [AIChannel(name=self.settings.child('daq_settings','ai_channel').value(),
                                       source='Analog_Input', analog_type='Voltage',
                                       value_min=-10., value_max=10., termination='Diff', ),
                             ]
@@ -103,10 +104,10 @@ class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
         self.controller['ai'].update_task(self.channels_ai, self.clock_settings, trigger_settings=self.trigger_settings)
 
         if self.settings['daq_settings','time_axis'] == 'Time':
-            dt = self.settings['daq_settings','frequency']/1000
+            dt = 1/(self.settings['daq_settings','frequency']*1000)
             self.x_axis = Axis(data=np.linspace(0, self.settings['daq_settings','Nsamples'], self.settings['daq_settings','Nsamples'], endpoint=False)*dt,
                                label='Time',
-                               units='Seconds',
+                               units='s',
                                index=0)
         elif self.settings['daq_settings','time_axis'] == 'Samples':
             self.x_axis = Axis(data=np.arange(self.settings['daq_settings','Nsamples']),
@@ -177,7 +178,7 @@ class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
     def emit_data(self, data):
         channels_name = [ch.name for ch in self.channels_ai]
 
-        if self.settings.child('daq_settings''display').value() == '0D':
+        if self.settings.child('daq_settings','display').value() == '0D':
             data = np.mean(data, 1)
             data_shape = 'Data0D'
         else:
@@ -191,8 +192,8 @@ class DAQ_1DViewer_DAQmxFAB1B(DAQ_Viewer_base):
         self.daqcard_data = DataToExport('DAQ Card', data=[DataFromPlugins(
             name='NI AI',
             data=data_export,
-            dim=data_shape, labels=channels_name)])
-        self.dte_ready_signal.emit()
+            dim=data_shape, labels=channels_name, axes=[self.x_axis])])
+        self.daqcard_ready_signal.emit()
 
     @Slot()
     def emit_daqcard_dte(self):
