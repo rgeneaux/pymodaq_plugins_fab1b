@@ -123,6 +123,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         if param.name() == "bit_depth":
             # self.controller.set_attribute_value("PixelEncoding",param.value())
             self.controller.set_attribute_value("SimplePreAmpGainControl",param.value())
+            self.settings.child("camera_settings", 'timing_opts', 'fps2').setValue(
+                self.controller.get_attribute_value('FrameRate'))
 
 
         if param.name() in ['display', 'fast_mode']:
@@ -182,6 +184,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
         if param.name() == 'acq_mode':
             self.set_acq_mode()
+            self._prepare_view()
 
     def ROISelect(self, roi_pos_size):
         self.roi_pos_size = roi_pos_size
@@ -375,6 +378,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                 data_shape = 'Data1D'
                 self.x_axis.index = 0
                 self.axes = [self.x_axis]
+                mock_data = np.zeros((width,))
 
         self.data_shape = data_shape
         dte = [DataFromPlugins(name='Camera Image',
@@ -449,7 +453,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         kwargs: (dict) of others optionals arguments
         """
         self.n_grabed_frames = 0
-        self.data = None
+        self.data = []
         self.timestamps = []
         self.temperature_timer.stop() #Stop temperature reading during acquisition
 
@@ -535,10 +539,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                     #Add frames to the list
                     if len(frames) >= 1:
                         self.n_grabed_frames += len(frames)    # Increment number of read frames
-                        if self.data is None:
-                            self.data = frames
-                        else:
-                            self.data.append(frames)
+                        self.data.append(frames)
 
                     # Store timestamps in ms
                     if self.settings["camera_settings",'dev', 'timestamps_on']:
@@ -618,7 +619,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         self.last_tick = current_tick
 
         # Update reading
-        if self.live and self.settings["camera_settings",'acq','acq_mode'] in ['Spectrum', 'Differential']:
+        if self.live and self.settings["camera_settings",'acq','acq_mode'] == "Fast 1D":
             scaling = self.settings["camera_settings",'timing_opts', 'chunk_size']
         else:
             scaling = 1
