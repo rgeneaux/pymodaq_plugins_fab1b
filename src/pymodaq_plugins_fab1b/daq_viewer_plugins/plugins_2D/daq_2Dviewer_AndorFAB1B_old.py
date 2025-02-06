@@ -34,7 +34,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                   {'title': 'Fast mode:', 'name': 'fast_mode', 'type': 'list', 'limits': ['Spectrum', 'Differential']},
                   {'title': 'Display:', 'name': 'display', 'type': 'list', 'limits': ['Average', '2D'], 'value':'Average'},
                   {'title': 'Differential type:', 'name': 'diff_type', 'type': 'list', 'limits': ['dR/R', 'dOD'], 'visible':False},
-                  {'title': 'Bit depth:', 'name': 'bit_depth', 'type': 'list', 'limits': []}]},
+                  {'title': 'Bit depth:', 'name': 'bit_depth', 'type': 'list', 'limits': ['Fastest frame rate (12-bit)', 'High dynamic range (16-bit)']}]
+              },
 
              {'title': 'Image', 'name': 'roi', 'type': 'group', 'children':
                  [{'title': 'Height', 'name': 'height', 'type': 'int', 'value': 2048},
@@ -120,7 +121,9 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             self.settings.child("camera_settings",'timing_opts', 'fps2').setValue(self.controller.get_attribute_value('FrameRate'))
 
         if param.name() == "bit_depth":
-            self.controller.set_attribute_value("PixelEncoding",param.value())
+            # self.controller.set_attribute_value("PixelEncoding",param.value())
+            self.controller.set_attribute_value("SimplePreAmpGainControl",param.value())
+
 
         if param.name() in ['display', 'fast_mode']:
             self._prepare_view()
@@ -245,12 +248,12 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         # Choose data type
         # self.controller.set_frame_format("array")
         self.controller.set_frame_format("list")
-
         self.controller.setup_acquisition(mode="sequence", nframes=self.buffer_size)
 
         # Set bit depth
-        self.settings.child("camera_settings",'acq','bit_depth').setOpts(limits=self.controller.get_attribute('PixelEncoding').values)
-        self.settings.child("camera_settings",'acq','bit_depth').setOpts(value=self.controller.get_attribute_value('PixelEncoding'))
+        self.controller.set_attribute_value("SimplePreAmpGainControl", self.settings["camera_settings", "acq", "bit_depth"])
+        # self.settings.child("camera_settings",'acq','bit_depth').setOpts(limits=self.controller.get_attribute('PixelEncoding').values)
+        # self.settings.child("camera_settings",'acq','bit_depth').setOpts(value=self.controller.get_attribute_value('PixelEncoding'))
 
         # Set exposure time
         self.controller.set_exposure(self.settings.child("camera_settings",'timing_opts', 'exposure_time').value() / 1000)
@@ -547,11 +550,11 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                         # Flatten the list of lists and convert to numpy
                         self.data = np.vstack([x for xs in self.data for x in xs])
 
-                        if self.settings["camera_settings",'acq','acq_mode'] == 'Spectrum':
+                        if self.settings["camera_settings",'acq','fast_mode'] == 'Spectrum':
                             if self.settings["camera_settings",'acq','display'] == 'Average':
                                 self.data = np.sum(self.data, axis=0) / self.n_grabed_frames   # divide for average
 
-                        elif self.settings["camera_settings",'acq','acq_mode'] == 'Differential':
+                        elif self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
                             tmp = self.data
                             pon = tmp[0::2]
                             poff = tmp[1::2]
