@@ -5,6 +5,7 @@ from pymodaq.utils.data import DataFromPlugins, Axis, DataToExport
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
 from pymodaq.utils.parameter.utils import iter_children
+from pymodaq.utils.plotting.utils.plot_utils import RoiInfo
 
 from qtpy import QtWidgets, QtCore
 from time import perf_counter
@@ -74,7 +75,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
     ]
     start_waitloop = QtCore.Signal()
     stop_waitloop = QtCore.Signal()
-    roi_pos_size = QtCore.QRectF(0,0,10,10)
+    roi_info = None
     axes = []
     live = False
     n_grabed_frames = 0
@@ -128,6 +129,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
 
         if param.name() in ['display', 'fast_mode']:
+            self.set_acq_mode()
             self._prepare_view()
 
         if param.name() == "fps_on":
@@ -140,10 +142,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                 # We handle ROI and binning separately for clarity
                 (old_x, _, old_y, _, xbin, ybin) = self.controller.get_roi()  # Get current binning
 
-                x0 = self.roi_pos_size.x()
-                y0 = self.roi_pos_size.y()
-                width = self.roi_pos_size.width()
-                height = self.roi_pos_size.height()
+                y0, x0 = self.roi_info.origin.coordinates
+                height, width = self.roi_info.size.coordinates
 
                 # Values need to be rescaled by binning factor and shifted by current x0,y0 to be correct.
                 new_x = (old_x + x0) * xbin
@@ -186,8 +186,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             self.set_acq_mode()
             self._prepare_view()
 
-    def ROISelect(self, roi_pos_size):
-        self.roi_pos_size = roi_pos_size
+    def roi_select(self, roi_info, ind_viewer):
+        self.roi_info = roi_info
 
     def clear_roi(self):
         wdet, hdet = self.controller.get_detector_size()
@@ -199,6 +199,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         mode = self.settings["camera_settings",'acq','acq_mode']
         if mode == 'Normal':
             self.settings.child("camera_settings",'timing_opts', 'chunk_size').hide()
+            self.settings.child("camera_settings", "roi", "update_roi").show()
             #self.settings.child("camera_settings",'trigger', 'trigger_mode').setValue('Internal')
             self.settings.child("camera_settings",'dev').hide()
             self.settings.child("camera_settings",'acq','fast_mode').hide()
@@ -207,7 +208,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
         else:
             self.settings.child("camera_settings",'acq','fast_mode').show()
-
+            self.settings.child("camera_settings","roi","update_roi").hide()
             fast_mode = self.settings["camera_settings",'acq','fast_mode']
             self.settings.child("camera_settings",'timing_opts', 'chunk_size').show()
             #self.settings.child("camera_settings",'trigger', 'trigger_mode').setValue('External')
@@ -350,7 +351,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         self.settings.child("camera_settings",'roi','height').setValue(height)
         self.settings.child("camera_settings",'roi', 'left').setValue(hstart)
         self.settings.child("camera_settings",'roi', 'bottom').setValue(vstart)
-        mock_data = np.zeros((width, height))
+        mock_data = np.zeros((height, width))
 
         self.x_axis = Axis(data=np.linspace(0,width,width, endpoint=False), label='Pixels', index=1)
 
@@ -368,7 +369,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             if self.settings["camera_settings",'acq','display'] == '2D':   # spectra are shown in 2D
                 data_shape = 'Data2D'
                 nchunk = self.settings["camera_settings",'timing_opts','chunk_size']
-                if self.settings["camera_settings",'acq','acq_mode'] == 'Differential':
+                if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
                     nchunk = int(nchunk/2)
                 self.y_axis = Axis(data=np.linspace(0, nchunk, nchunk, endpoint=False), label='Shot', index=0)
                 self.axes = [self.x_axis, self.y_axis]
@@ -401,7 +402,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                 dte.append(timestamp_data)
 
             if ponoff:
-                if self.settings["camera_settings",'acq','acq_mode'] == 'Differential' and self.settings["camera_settings",'acq','display'] == 'Average':
+                if self.settings["camera_settings",'acq','fast_mode'] == 'Differential' and self.settings["camera_settings",'acq','display'] == 'Average':
                     dte.append(DataFromPlugins(name='Pump Off/On',
                                                data=[np.squeeze(mock_data), np.squeeze(mock_data)],
                                                dim='Data1D',
@@ -534,7 +535,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                         info = info[:remaining_frames]
 
                     if len(frames) == 0:    # if we already have everything
-                        return
+                        logger.info("Length zero")
+                        return dte, do_emit
 
                     #Add frames to the list
                     if len(frames) >= 1:
@@ -660,7 +662,7 @@ class PylablibCallback(QtCore.QObject):
         self.wait_fn = wait_fn
         self.running = False
 
-    def start(self, nframes=1, wait_time=1):
+    def start(self, nframes=1, wait_time=10):
         self.running = True
         self.wait_for_acquisition(nframes, wait_time)
 
