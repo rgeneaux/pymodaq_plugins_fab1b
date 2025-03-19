@@ -27,7 +27,7 @@ for camera in camera_list:
     cam.close()
 
 
-class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
+class DAQ_2DViewer_AndorFAB1B_PMD3(DAQ_Viewer_base):
     """
     """
 
@@ -378,7 +378,7 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
             self.controller.get_attribute_value('FrameRate'))
         dte = self.generate_dte_temp()
         # init the viewers
-        self.dte_signal_temp.emit(dte)
+        self.data_grabed_signal_temp.emit(dte)
         QtWidgets.QApplication.processEvents()
 
 
@@ -450,7 +450,7 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
                                                labels=['Pump Off', 'Pump On'],
                                                axes=self.axes))
 
-        return DataToExport("Andor", data=dte)
+        return dte#DataToExport("Andor", data=dte)
 
 
     def get_roi_from_settings(self):
@@ -534,13 +534,13 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
             # Emit the frame.
             if do_emit:
 
-                self.dte_signal.emit(dte)
+                self.data_grabed_signal.emit(dte)
 
                 if self.settings.child("camera_settings",'timing_opts', 'fps_on').value():
                     self.update_fps()
 
                 if self.take_bkg_this_shot:
-                    ponoff = dte.get_data_from_name("Pump On/Off").data
+                    ponoff = self.parent.datas[1]['data']#dte.get_data_from_name("Pump On/Off").data
                     avgs = [np.mean(spectrum) for spectrum in ponoff]
                     if avgs[1] > avgs[0]:
                         self.bkg_poff, self.bkg_pon = ponoff
@@ -555,8 +555,9 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
             self.emit_status(ThreadCommand('Update_Status', [str(e), 'log']))
 
     def generate_dte_real(self):
-        dte = DataToExport(name='Andor', data=[])
+        dte = []#DataToExport(name='Andor', data=[])
         do_emit = False
+        name = "Camera Image"
 
         # CASE 1 : Normal acquision regardless of size
         if self.settings["camera_settings",'acq','acq_mode'] == 'Normal':
@@ -612,6 +613,7 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
                         if self.settings["camera_settings",'acq','fast_mode'] == 'Spectrum':
                             if self.settings["camera_settings",'acq','display'] == 'Average':
                                 self.data = np.sum(self.data, axis=0) / self.n_grabed_frames   # divide for average
+                                name = "Average chunk spectrum"
 
                         elif self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
                             tmp = self.data
@@ -628,8 +630,10 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
 
                             if self.settings["camera_settings",'acq','diff_type'] == 'dR/R':
                                 self.data = (pon-poff)/poff
+                                name = "Differential Reflectivity"
                             elif self.settings["camera_settings",'acq','diff_type'] == 'dOD':
                                 self.data = -np.real(np.log(pon/poff))
+                                name = "Differential Optical Density"
 
                             self.data[np.isnan(self.data)] = 0
                             self.data[np.isinf(self.data)] = 0
@@ -642,7 +646,7 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
                         do_emit = True
 
         if do_emit:
-            dfp_list = [DataFromPlugins(name='Camera Image',
+            dfp_list = [DataFromPlugins(name=name,
                                    data=[np.squeeze(self.data)],
                                    dim=self.data_shape,
                                    labels=[f'Camera'],
@@ -664,7 +668,7 @@ class DAQ_2DViewer_AndorFAB1B_Pmd3(DAQ_Viewer_base):
                                            axes=[taxis],
                                            label='Timestamps (ms)'))
 
-            dte = DataToExport(name='Andor', data=dfp_list)
+            dte = dfp_list#DataToExport(name='Andor', data=dfp_list)
             self.data = []  # Clear variables
             self.timestamps = []
 

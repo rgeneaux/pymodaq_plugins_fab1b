@@ -1,9 +1,9 @@
 ## To modify by developper(s) of the plugin
 
 [plugin-info]
-SHORT_PLUGIN_NAME = 'greateyes'
+SHORT_PLUGIN_NAME = 'andor_fab1b'
 
-package-url = 'https://github.com/Attolab/pymodaq_plugins_greateyes'
+package-url = 'https://github.com/Attolab/pymodaq_plugins_andor'
 description = 'some word about your plugin'
 
 author = 'PyMoDAQ plugin for instruments from Greateyes (ALEX, ELSE, GE XXXX)'
