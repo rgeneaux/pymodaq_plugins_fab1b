@@ -5,7 +5,11 @@ from pymodaq.utils.data import DataFromPlugins, Axis, DataToExport
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
 from pymodaq.utils.parameter.utils import iter_children
-from pymodaq.utils.plotting.utils.plot_utils import RoiInfo
+
+try:
+    from pymodaq.utils.plotting.utils.plot_utils import RoiInfo
+except:
+    from pymodaq_gui.plotting.utils.plot_utils import RoiInfo
 
 from qtpy import QtWidgets, QtCore
 from time import perf_counter
@@ -62,9 +66,11 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                   'label': 'Fire', 'visible': False},
                  {'title': 'External Trigger delay (ms):', 'name': 'ext_trigger_delay', 'type': 'float', 'value': 0.,'visible': False},
              ]},
-             {'title': 'Developer Settings:', 'name': 'dev', 'type': 'group', 'children': [
+             {'title': 'Pump-Probe Settings:', 'name': 'dev', 'type': 'group', 'children': [
                  {'title': 'Show Timestamps', 'name': 'timestamps_on', 'type': 'bool', 'value': False},
-                 {'title': 'Show Pump On/Off', 'name': 'pumponoff_on', 'type': 'bool', 'value': False},
+                 {'title': 'Show Pump On/Off', 'name': 'pumponoff_on', 'type': 'bool', 'value': True},
+                 {'title': 'Take Backgrounds', 'name': 'take_bkg', 'type': 'bool_push', 'value': False},
+                 {'title': 'Clear Backgrounds', 'name': 'clear_bkg', 'type': 'bool_push', 'value': False},
              ]},
              {'title': 'Temperature Settings:', 'name': 'temperature_settings', 'type': 'group', 'children': [
                  {'title': 'Enable Cooling:', 'name': 'enable_cooling', 'type': 'bool', 'value': False},
@@ -102,6 +108,10 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         self.temperature_timer.timeout.connect(self.update_temperature)
         self.temp_freq = 2000 # Frequency of temperature timer in ms
 
+        self.bkg_poff = None
+        self.bkg_pon = None
+        self.take_bkg_this_shot = False
+
     def commit_settings(self, param: Parameter):
         """Apply the consequences of a change of value in the detector settings
 
@@ -110,33 +120,34 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         param: Parameter
             A given parameter (within detector_settings) whose value has been changed by the user
         """
+
+        # Temperature management
+        # ----------------------
         if param.name() == 'set_point':
             self.controller.set_temperature(param.value(), enable_cooler=False)
 
         elif param.name() in iter_children(self.settings.child('camera_settings', 'temperature_settings'), []):
             self.setup_temperature()
 
-        if param.name() == "exposure_time":
+        # Acquisition parameters
+        # ----------------------
+        elif param.name() == "exposure_time":
             self.controller.set_attribute_value("ExposureTime", param.value() / 1000)
             self.settings.child("camera_settings",'timing_opts', 'exposure_time').setValue(self.controller.get_attribute_value("ExposureTime")*1000)
             self.settings.child("camera_settings",'timing_opts', 'fps2').setValue(self.controller.get_attribute_value('FrameRate'))
 
-        if param.name() == "bit_depth":
+        elif param.name() == "bit_depth":
             # self.controller.set_attribute_value("PixelEncoding",param.value())
             self.controller.set_attribute_value("SimplePreAmpGainControl",param.value())
             self.settings.child("camera_settings", 'timing_opts', 'fps2').setValue(
                 self.controller.get_attribute_value('FrameRate'))
 
+        elif param.name() in iter_children(self.settings.child("camera_settings",'trigger'), []):
+            self.set_trigger()
 
-        if param.name() in ['display', 'fast_mode']:
-            self.set_acq_mode()
-            self._prepare_view()
-
-        if param.name() == "fps_on":
-            self.settings.child("camera_settings",'timing_opts', 'fps').setOpts(visible=param.value())
-            self.settings.child("camera_settings",'timing_opts', 'fps2').setOpts(visible=param.value())
-
-        if param.name() == "update_roi":
+        # ROI
+        # ---
+        elif param.name() == "update_roi":
             if param.value():  # Switching on ROI
 
                 # We handle ROI and binning separately for clarity
@@ -156,11 +167,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
                 param.setValue(False)
 
-        if param.name() in iter_children(self.settings.child("camera_settings",'roi'), []):
-            new_roi = self.get_roi_from_settings()
-            self.update_rois(new_roi)
-
-        if param.name() == 'binning':
+        elif param.name() == 'binning':
             # We handle ROI and binning separately for clarity
             (x0, w, y0, h, *_) = self.controller.get_roi()  # Get current ROI
             xbin = self.settings.child("camera_settings",'roi','binning').value()
@@ -168,23 +175,53 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             new_roi = (x0, w, xbin, y0, h, ybin)
             self.update_rois(new_roi)
 
-        if param.name() == "clear_roi":
+        elif param.name() == "clear_roi":
             if param.value():  # Switching on ROI
                 self.clear_roi()
                 param.setValue(False)
 
-        if param.name() == 'timestamps_on':
+        # Other ROI Parameters
+        elif param.name() in iter_children(self.settings.child("camera_settings",'roi'), []):
+            new_roi = self.get_roi_from_settings()
+            self.update_rois(new_roi)
+
+        # Options for Fast 1D Mode
+        # ------------------------
+        elif param.name() == "fps_on":
+            self.settings.child("camera_settings",'timing_opts', 'fps').setOpts(visible=param.value())
+            self.settings.child("camera_settings",'timing_opts', 'fps2').setOpts(visible=param.value())
+
+        elif param.name() == 'timestamps_on':
             self._prepare_view()
 
-        elif param.name() in iter_children(self.settings.child("camera_settings",'trigger'), []):
-            self.set_trigger()
-
-        if param.name() == 'pumponoff_on':
+        elif param.name() == 'pumponoff_on':
             self._prepare_view()
 
-        if param.name() == 'acq_mode':
+        elif param.name() == 'chunk_size':
+            if param.value() % 2:
+                self.settings.child("camera_settings",'timing_opts', 'chunk_size').setValue(param.value()+1)
+            self._prepare_view()
+
+        # Switching between various modes
+        # -------------------------------
+        elif param.name() in ['display', 'fast_mode']:
             self.set_acq_mode()
             self._prepare_view()
+
+        elif param.name() == 'acq_mode':
+            self.set_acq_mode()
+            self._prepare_view()
+
+        # Backgrounds
+        # -----------
+        elif param.name() == "take_bkg":
+            self.take_background()
+            param.setValue(False)
+
+        elif param.name() == "clear_bkg":
+            self.clear_background()
+            param.setValue(False)
+
 
     def roi_select(self, roi_info, ind_viewer):
         self.roi_info = roi_info
@@ -373,7 +410,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                     nchunk = int(nchunk/2)
                 self.y_axis = Axis(data=np.linspace(0, nchunk, nchunk, endpoint=False), label='Shot', index=0)
                 self.axes = [self.x_axis, self.y_axis]
-                mock_data = np.zeros((width, nchunk))
+                mock_data = np.zeros((nchunk, width))
 
             else: # this is in 1D:
                 data_shape = 'Data1D'
@@ -401,13 +438,13 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                                                  dim='Data1D')
                 dte.append(timestamp_data)
 
-            if ponoff:
-                if self.settings["camera_settings",'acq','fast_mode'] == 'Differential' and self.settings["camera_settings",'acq','display'] == 'Average':
-                    dte.append(DataFromPlugins(name='Pump Off/On',
+            if ponoff and self.settings["camera_settings",'acq','fast_mode'] == 'Differential' :
+                dte.append(DataFromPlugins(name='Pump Off/On',
                                                data=[np.squeeze(mock_data), np.squeeze(mock_data)],
-                                               dim='Data1D',
+                                               dim=self.data_shape,
                                                labels=['Pump Off', 'Pump On'],
                                                axes=self.axes))
+
         return DataToExport("Andor", data=dte)
 
 
@@ -461,6 +498,9 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         if 'live' in kwargs:
             self.live = kwargs['live']
 
+        if 'take_bkg' in kwargs:
+            self.take_bkg_this_shot = kwargs['take_bkg']
+
         try:
             # Warning, acquisition_in_progress returns 1,0 and not a real bool
             if not self.controller.acquisition_in_progress():
@@ -488,10 +528,20 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
             # Emit the frame.
             if do_emit:
+
                 self.dte_signal.emit(dte)
 
                 if self.settings.child("camera_settings",'timing_opts', 'fps_on').value():
                     self.update_fps()
+
+                if self.take_bkg_this_shot:
+                    ponoff = dte.get_data_from_name("Pump On/Off").data
+                    avgs = [np.mean(spectrum) for spectrum in ponoff]
+                    if avgs[1] > avgs[0]:
+                        self.bkg_poff, self.bkg_pon = ponoff
+                    else:
+                        self.bkg_pon, self.bkg_poff = ponoff
+                    self.take_bkg_this_shot = False
 
             # To make sure that timed events are executed in continuous grab mode
             QtWidgets.QApplication.processEvents()
@@ -535,7 +585,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                         info = info[:remaining_frames]
 
                     if len(frames) == 0:    # if we already have everything
-                        logger.info("Length zero")
+                        logger.info("Length zero, looks like something went wrong: stopping continuous grab")
+                        self.live = False
                         return dte, do_emit
 
                     #Add frames to the list
@@ -561,7 +612,14 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                             tmp = self.data
                             pon = tmp[0::2]
                             poff = tmp[1::2]
-                            poff[poff==0] = 1e-10
+
+                            if pon.mean()<poff.mean():
+                                pon, poff = poff, pon
+
+                            if self.bkg_poff is not None and self.bkg_pon is not None:
+                                pon -= self.bkg_pon
+                                poff -= self.bkg_poff
+                            poff[poff == 0] = 1e-10
 
                             if self.settings["camera_settings",'acq','diff_type'] == 'dR/R':
                                 self.data = (pon-poff)/poff
@@ -585,7 +643,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                                    labels=[f'Camera'],
                                    axes=self.axes)]
 
-            if self.settings["camera_settings",'acq','acq_mode'] == 'Differential' and self.settings["camera_settings",'acq','display'] == 'Average' and self.settings["camera_settings",'dev','pumponoff_on']:
+            if self.settings["camera_settings",'acq','fast_mode'] == 'Differential' and self.settings["camera_settings",'dev','pumponoff_on']:
                 dfp_list.append(DataFromPlugins(name='Pump On/Off',
                                            data=[np.squeeze(poff), np.squeeze(pon)],
                                            dim=self.data_shape,
@@ -602,8 +660,17 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                                            label='Timestamps (ms)'))
 
             dte = DataToExport(name='Andor', data=dfp_list)
+            self.data = []  # Clear variables
+            self.timestamps = []
 
         return dte, do_emit
+
+    def take_background(self):
+       self.grab_data(take_bkg=True)
+
+    def clear_background(self):
+        self.bkg_poff = None
+        self.bkg_pon = None
 
     def update_fps(self):
         current_tick = perf_counter()
