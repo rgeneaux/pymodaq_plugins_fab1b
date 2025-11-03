@@ -5,6 +5,8 @@ from pymodaq.utils.data import DataFromPlugins, Axis, DataToExport
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
 from pymodaq.utils.parameter.utils import iter_children
+from pymodaq_gui.h5modules.saving import H5Saver
+from pymodaq.utils.h5modules import module_saving
 
 try:
     from pymodaq.utils.plotting.utils.plot_utils import RoiInfo
@@ -19,6 +21,9 @@ from pymodaq.utils.logger import set_logger, get_module_name
 logger = set_logger(get_module_name(__file__))
 
 from pylablib.devices import Andor
+from pymodaq_plugins_fab1b.daq_move_plugins.daq_move_VLM1 import DAQ_Move_VLM1
+from pymodaq.utils.parameter import utils as putils
+
 camera_list = [*range(Andor.get_cameras_number_SDK3())]
 camera_names_list = dict()
 for camera in camera_list:
@@ -27,9 +32,14 @@ for camera in camera_list:
     cam.close()
 
 
-class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
+class DAQ_2DViewer_AndorShutter_PMD5(DAQ_Viewer_base, DAQ_Move_VLM1):
     """
     """
+    params_shutter = DAQ_Move_VLM1.params
+    axis_unit = ''
+    d = putils.get_param_dict_from_name(params_shutter, 'multiaxes')
+    if d is not None:
+        d['visible'] = False
 
     params = comon_parameters + [
         {'title': 'Camera Settings:', 'name': 'camera_settings', 'type': 'group', 'children':
@@ -37,7 +47,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
              {'title': 'Acquisition', 'name': 'acq', 'type': 'group', 'children':
                  [{'title': 'Acquisition mode:', 'name': 'acq_mode', 'type': 'list', 'limits': ['Normal', 'Fast 1D']},#'Spectrum', 'Differential', 'Sequence'], 'value':'Spectrum'},
                   {'title': 'Fast mode:', 'name': 'fast_mode', 'type': 'list', 'limits': ['Spectrum', 'Differential']},
-                  {'title': 'Display:', 'name': 'display', 'type': 'list', 'limits': ['Average', '2D'], 'value':'Average'},
+                  #{'title': 'Display:', 'name': 'display', 'type': 'list', 'limits': ['Average', '2D'], 'value':'Average'},
                   {'title': 'Differential type:', 'name': 'diff_type', 'type': 'list', 'limits': ['dR/R', 'dOD'], 'visible':False},
                   {'title': 'Bit depth:', 'name': 'bit_depth', 'type': 'list', 'limits': ['Fastest frame rate (12-bit)', 'High dynamic range (16-bit)']}]
               },
@@ -55,7 +65,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
              {'title': 'Timing', 'name': 'timing_opts', 'type': 'group', 'children':
                  [{'title': 'Exposure Time (ms)', 'name': 'exposure_time', 'type': 'float', 'value': 20},#0.13},
-                  {'title': 'Chunk size', 'name': 'chunk_size', 'type': 'int', 'value': 1000},
+                  {'title': 'Chunk size', 'name': 'chunk_size', 'type': 'int', 'value': 1},
                   {'title': 'Compute FPS', 'name': 'fps_on', 'type': 'bool', 'value': True},
                   {'title': 'Actual FPS', 'name': 'fps', 'type': 'float', 'value': 0.0, 'readonly': True, 'decimals': 6},
                   {'title': 'Max FPS', 'name': 'fps2', 'type': 'float', 'value': 0.0, 'readonly': True, 'decimals': 6}]
@@ -66,11 +76,15 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                   'label': 'Fire', 'visible': False},
                  {'title': 'External Trigger delay (ms):', 'name': 'ext_trigger_delay', 'type': 'float', 'value': 0.,'visible': False},
              ]},
+             {'title': 'Shutter:', 'name': 'shutter_bool', 'type': 'led_push', 'value': False},
              {'title': 'Pump-Probe Settings:', 'name': 'dev', 'type': 'group', 'children': [
                  {'title': 'Show Timestamps', 'name': 'timestamps_on', 'type': 'bool', 'value': False},
                  {'title': 'Show Pump On/Off', 'name': 'pumponoff_on', 'type': 'bool', 'value': True},
+                 #{'title': 'N Average for backgrounds', 'name': 'navg_bkg', 'type': 'int', 'value': 1},
+                 {'title': 'On before off', 'name': 'on_before_off', 'type': 'bool', 'value': False},
                  {'title': 'Take Backgrounds', 'name': 'take_bkg', 'type': 'bool_push', 'value': False},
                  {'title': 'Clear Backgrounds', 'name': 'clear_bkg', 'type': 'bool_push', 'value': False},
+                 #{'title': 'Current background file', 'name': 'current_bkg_file', 'type': 'text', 'value': 'No background', 'readonly': True},
              ]},
              {'title': 'Temperature Settings:', 'name': 'temperature_settings', 'type': 'group', 'children': [
                  {'title': 'Enable Cooling:', 'name': 'enable_cooling', 'type': 'bool', 'value': False},
@@ -78,7 +92,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                  {'title': 'Current value:', 'name': 'current_value', 'type': 'float', 'value': 20, 'readonly': True},
              ]},
              ]}
-    ]
+    ] + params_shutter
+
     start_waitloop = QtCore.Signal()
     stop_waitloop = QtCore.Signal()
     roi_info = None
@@ -95,6 +110,10 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
     def ini_attributes(self):
         self.controller: None
 
+        # needed attributes for saving methods
+        self.title = "Andor Camera"
+        self.ui = None
+
         self.x_axis = None
         self.y_axis = None
         self.last_tick = 0.0  # time counter used to compute FPS
@@ -110,7 +129,8 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
         self.bkg_poff = None
         self.bkg_pon = None
-        self.take_bkg_this_shot = False
+        self.poff = None
+        self.pon = None
 
     def commit_settings(self, param: Parameter):
         """Apply the consequences of a change of value in the detector settings
@@ -198,9 +218,18 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             self._prepare_view()
 
         elif param.name() == 'chunk_size':
-            if param.value() % 2:
-                self.settings.child("camera_settings",'timing_opts', 'chunk_size').setValue(param.value()+1)
+            # if param.value() % 2:
+            #     self.settings.child("camera_settings",'timing_opts', 'chunk_size').setValue(param.value()+1)
             self._prepare_view()
+
+        elif param.name() == 'COM_port':
+            DAQ_Move_VLM1.commit_settings(self, param)
+
+        elif param.name() == 'shutter_bool':
+            if param.value():
+                self.move_abs(1)
+            else:
+                self.move_abs(0)
 
         # Switching between various modes
         # -------------------------------
@@ -215,11 +244,13 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         # Backgrounds
         # -----------
         elif param.name() == "take_bkg":
-            self.take_background()
+            if param.value():
+                self.take_background()
             param.setValue(False)
 
         elif param.name() == "clear_bkg":
-            self.clear_background()
+            if param.value():
+                self.clear_background()
             param.setValue(False)
 
 
@@ -241,7 +272,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             self.settings.child("camera_settings",'dev').hide()
             self.settings.child("camera_settings",'acq','fast_mode').hide()
             self.settings.child("camera_settings",'acq','diff_type').hide()
-            self.settings.child("camera_settings",'acq','display').hide()
+            # self.settings.child("camera_settings",'acq','display').hide()
 
         else:
             self.settings.child("camera_settings",'acq','fast_mode').show()
@@ -250,7 +281,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             self.settings.child("camera_settings",'timing_opts', 'chunk_size').show()
             #self.settings.child("camera_settings",'trigger', 'trigger_mode').setValue('External')
             self.settings.child("camera_settings",'dev').show()
-            self.settings.child("camera_settings",'acq','display').show()
+            # self.settings.child("camera_settings",'acq','display').show()
 
             if fast_mode == 'Differential':
                 self.settings.child("camera_settings",'acq','diff_type').show()
@@ -283,6 +314,10 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             False if initialization failed otherwise True
         """
         # Initialize camera class
+        shutter_initialized = DAQ_Move_VLM1.ini_stage(self, controller)
+        if shutter_initialized[1]:
+            self.move_home()  # close shutter
+
         self.ini_detector_init(old_controller=controller,
                                new_controller=self.init_controller())
 
@@ -367,6 +402,14 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             self.update_temperature()
             # set timer to update temperature info from controller
 
+    def move_abs(self, position):
+        DAQ_Move_VLM1.move_abs(self, position)
+        if position == 0:
+            self.settings.child('camera_settings', 'shutter_bool').setValue(False)
+            self.shutter_status = False
+        else:
+            self.settings.child('camera_settings', 'shutter_bool').setValue(True)
+            self.shutter_status = True
 
     def _prepare_view(self):
         self.settings.child("camera_settings", 'timing_opts', 'fps2').setValue(
@@ -403,20 +446,20 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                 self.axes = [self.x_axis]
 
         else:  # FAST MODE
-            if self.settings["camera_settings",'acq','display'] == '2D':   # spectra are shown in 2D
-                data_shape = 'Data2D'
-                nchunk = self.settings["camera_settings",'timing_opts','chunk_size']
-                if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
-                    nchunk = int(nchunk/2)
-                self.y_axis = Axis(data=np.linspace(0, nchunk, nchunk, endpoint=False), label='Shot', index=0)
-                self.axes = [self.x_axis, self.y_axis]
-                mock_data = np.zeros((nchunk, width))
-
-            else: # this is in 1D:
-                data_shape = 'Data1D'
-                self.x_axis.index = 0
-                self.axes = [self.x_axis]
-                mock_data = np.zeros((width,))
+            # if self.settings["camera_settings",'acq','display'] == '2D':   # spectra are shown in 2D
+            #     data_shape = 'Data2D'
+            #     nchunk = self.settings["camera_settings",'timing_opts','chunk_size']
+            #     if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
+            #         nchunk = int(nchunk/2)
+            #     self.y_axis = Axis(data=np.linspace(0, nchunk, nchunk, endpoint=False), label='Shot', index=0)
+            #     self.axes = [self.x_axis, self.y_axis]
+            #     mock_data = np.zeros((nchunk, width))
+            #
+            # else: # this is in 1D:
+            data_shape = 'Data1D'
+            self.x_axis.index = 0
+            self.axes = [self.x_axis]
+            mock_data = np.zeros((width,))
 
         self.data_shape = data_shape
         dte = [DataFromPlugins(name='Camera Image',
@@ -498,11 +541,12 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         if 'live' in kwargs:
             self.live = kwargs['live']
 
-        if 'take_bkg' in kwargs:
-            self.take_bkg_this_shot = kwargs['take_bkg']
-
         try:
-            # Warning, acquisition_in_progress returns 1,0 and not a real bool
+            if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
+                self.move_abs(int(self.settings["camera_settings", "dev", "on_before_off"]))  # Open or Close shutter depending on setting
+
+                QtCore.QThread.msleep(16)
+
             if not self.controller.acquisition_in_progress():
                 self.controller.clear_acquisition()
                 self.controller.start_acquisition()
@@ -534,24 +578,44 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
                 if self.settings.child("camera_settings",'timing_opts', 'fps_on').value():
                     self.update_fps()
 
-                if self.take_bkg_this_shot:
-                    ponoff = dte.get_data_from_name("Pump On/Off").data
-                    avgs = [np.mean(spectrum) for spectrum in ponoff]
-                    if avgs[1] > avgs[0]:
-                        self.bkg_poff, self.bkg_pon = ponoff
-                    else:
-                        self.bkg_pon, self.bkg_poff = ponoff
-                    self.take_bkg_this_shot = False
-
             # To make sure that timed events are executed in continuous grab mode
             QtWidgets.QApplication.processEvents()
 
         except Exception as e:
             self.emit_status(ThreadCommand('Update_Status', [str(e), 'log']))
 
+    # Might not be useful in the end
+    # def save_background(self, dte):
+    #     # Saving as viewer attribute
+    #     ponoff = dte.get_data_from_name("Pump On/Off").data
+    #
+    #     avgs = [np.mean(spectrum[self.settings["camera_settings", "dev", "background_px1"]:self.settings["camera_settings", "dev", "background_px2"]]) for
+    #             spectrum in ponoff]
+    #     if avgs[1] > avgs[0]:
+    #         self.bkg_poff, self.bkg_pon = ponoff
+    #     else:
+    #         self.bkg_pon, self.bkg_poff = ponoff
+    #
+    #     # Saving to h5 file for future post-processing
+    #     h5saver = H5Saver(save_type='detector')
+    #     h5saver.settings.child("base_name").setValue("Background")
+    #     h5saver.init_file(update_h5=True, custom_naming=False)
+    #
+    #     self.settings["camera_settings", "dev", "current_bkg_file"] = h5saver.settings["current_h5_file"]
+    #
+    #     self.module_and_data_saver = module_saving.DetectorSaver(self)
+    #     self.module_and_data_saver.h5saver = h5saver
+    #
+    #     detector_node = self.module_and_data_saver.get_set_node()
+    #     self.module_and_data_saver.add_data(detector_node, dte)
+    #
+    #     h5saver.close_file()
+
+
     def generate_dte_real(self):
         dte = DataToExport(name='Andor', data=[])
         do_emit = False
+        label='Image'
 
         # CASE 1 : Normal acquision regardless of size
         if self.settings["camera_settings",'acq','acq_mode'] == 'Normal':
@@ -570,74 +634,63 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
             frames, info = self.controller.read_multiple_images(return_info=True)
 
             if frames is not None:
-                if len(frames)>0:    #happens sometimes for some reason
+                if len(frames) > 0:
                     if np.squeeze(frames[0]).ndim ==2:       #if each frame is a 2D image
-                        frames = [np.mean(frame, axis=0) for frame in frames]    # Software full vertical binning. frames size = [nframes, 2048]
+                        frames = [np.sum(frame, axis=0) for frame in frames]    # Software full vertical binning. frames size = [nframes, 2048]
+                    self.data = sum(frames) / len(frames)
 
-                    if len(frames) == self.buffer_size:
-                        logger.warning("Frame buffer is full ("+str(len(frames))+" frames) - consider increasing its size")
+                    if self.settings["camera_settings", 'acq', 'fast_mode'] == 'Spectrum':
+                        do_emit = True
 
-                    remaining_frames = self.settings["camera_settings",'timing_opts', 'chunk_size'] - self.n_grabed_frames
+                    elif self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
+                        shutter_state = self.shutter_status #shutter state during this acquisition
+                        if not shutter_state:  # This was pump off
+                            self.poff = self.data
+                            self.move_abs(1)  # Open shutter
 
-                    # If we have more frames than chunk size we drop the extra
-                    if len(frames) > remaining_frames:
-                        frames = frames[:remaining_frames]
-                        info = info[:remaining_frames]
+                        else:  # This was pump on
+                            self.pon = self.data
+                            self.move_abs(0)  # Close shutter
 
-                    if len(frames) == 0:    # if we already have everything
-                        logger.info("Length zero, looks like something went wrong: stopping continuous grab")
-                        self.live = False
-                        return dte, do_emit
+                        # Differential acquisition is finished if:
+                        # We are in "off before on" and this shot is pump on
+                        # Or we are in "on before off" and this is pump off
+                        # This is a XOR
+                        acq_finished = self.settings["camera_settings", "dev", "on_before_off"] ^ shutter_state
 
-                    #Add frames to the list
-                    if len(frames) >= 1:
-                        self.n_grabed_frames += len(frames)    # Increment number of read frames
-                        self.data.append(frames)
+                        #Depending on mode, clear data or process it
+                        if not acq_finished:
+                            self.data = []
+                            do_emit = False
 
-                    # Store timestamps in ms
-                    if self.settings["camera_settings",'dev', 'timestamps_on']:
-                        # Save timestamps in ms:
-                        self.timestamps.extend(info[:, 1]/self.timestamp_frequency*1000)
-
-                    # If we have enough for the chunk,
-                    if self.n_grabed_frames >= self.settings["camera_settings",'timing_opts', 'chunk_size']:
-                        # Flatten the list of lists and convert to numpy
-                        self.data = np.vstack([x for xs in self.data for x in xs])
-
-                        if self.settings["camera_settings",'acq','fast_mode'] == 'Spectrum':
-                            if self.settings["camera_settings",'acq','display'] == 'Average':
-                                self.data = np.sum(self.data, axis=0) / self.n_grabed_frames   # divide for average
-
-                        elif self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
-                            tmp = self.data
-                            pon = tmp[0::2]
-                            poff = tmp[1::2]
-
-                            if pon.mean()<poff.mean():
-                                pon, poff = poff, pon
-
+                        else:
                             if self.bkg_poff is not None and self.bkg_pon is not None:
-                                pon -= self.bkg_pon
-                                poff -= self.bkg_poff
-                            poff[poff == 0] = 1e-10
+                                self.pon -= self.bkg_pon
+                                self.poff -= self.bkg_poff
+
+                            self.poff[self.poff == 0] = 1e-10
+                            self.pon[self.pon == 0] = 1e-10
 
                             if self.settings["camera_settings",'acq','diff_type'] == 'dR/R':
-                                self.data = (pon-poff)/poff
+                                self.data = (self.pon-self.poff)/self.poff
+                                name = "Differential Reflectivity"
+
                             elif self.settings["camera_settings",'acq','diff_type'] == 'dOD':
-                                self.data = -np.real(np.log(pon/poff))
+                                self.data = -np.real(np.log(self.pon/self.poff))
+                                name = "Differential Optical Density"
 
                             self.data[np.isnan(self.data)] = 0
                             self.data[np.isinf(self.data)] = 0
+                            #
+                            # if self.settings["camera_settings",'acq','display'] == 'Average':
+                            #     self.data = np.nanmean(self.data, axis=0)
+                            #     pon = np.nanmean(pon, axis=0)
+                            #     poff = np.nanmean(poff, axis=0)
 
-                            if self.settings["camera_settings",'acq','display'] == 'Average':
-                                self.data = np.nanmean(self.data, axis=0)
-                                pon = np.nanmean(pon, axis=0)
-                                poff = np.nanmean(poff, axis=0)
-
-                        do_emit = True
+                            do_emit = True
 
         if do_emit:
-            dfp_list = [DataFromPlugins(name='Camera Image',
+            dfp_list = [DataFromPlugins(name=label,
                                    data=[np.squeeze(self.data)],
                                    dim=self.data_shape,
                                    labels=[f'Camera'],
@@ -645,7 +698,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
 
             if self.settings["camera_settings",'acq','fast_mode'] == 'Differential' and self.settings["camera_settings",'dev','pumponoff_on']:
                 dfp_list.append(DataFromPlugins(name='Pump On/Off',
-                                           data=[np.squeeze(poff), np.squeeze(pon)],
+                                           data=[np.squeeze(self.poff), np.squeeze(self.pon)],
                                            dim=self.data_shape,
                                            labels=['Pump Off', 'Pump On'],
                                            axes=self.axes))
@@ -666,11 +719,20 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         return dte, do_emit
 
     def take_background(self):
-       self.grab_data(take_bkg=True)
+        self.move_abs(0)  # Close shutter
+        QtCore.QThread.msleep(16)
+        self.bkg_poff = np.sum(self.controller.snap(), axis=0)#np.mean([np.sum(frame, axis=0) for frame in self.controller.grab(nframes=self.settings["camera_settings", "dev", "navg_bkg"])])
+
+        self.move_abs(1)  # Open shutter
+        QtCore.QThread.msleep(16)
+        self.bkg_pon = np.sum(self.controller.snap(), axis=0)#np.mean([np.sum(frame, axis=0) for frame in self.controller.grab(nframes=self.settings["camera_settings", "dev", "navg_bkg"])])
+        self.move_abs(0)
+
 
     def clear_background(self):
         self.bkg_poff = None
         self.bkg_pon = None
+        # self.settings["camera_settings", "dev", "current_bkg_file"] = "No background"
 
     def update_fps(self):
         current_tick = perf_counter()
@@ -710,6 +772,7 @@ class DAQ_2DViewer_AndorFAB1B_old(DAQ_Viewer_base):
         self.status.info = ""
 
     def stop(self):
+        self.move_abs(int(self.settings["camera_settings", "dev", "on_before_off"])) # in this mode, we keep shutter open
         """Stop the acquisition."""
         self.stop_waitloop.emit()
         self.controller.stop_acquisition()
