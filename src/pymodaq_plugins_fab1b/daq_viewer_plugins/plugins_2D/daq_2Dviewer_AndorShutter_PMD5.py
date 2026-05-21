@@ -11,7 +11,7 @@ from pymodaq.utils.h5modules import module_saving
 try:
     from pymodaq.utils.plotting.utils.plot_utils import RoiInfo
 except:
-    from pymodaq_gui.plotting.utils.plot_utils import RoiInfo
+    from pymodaq_gui.plotting.items.roi import RoiInfo
 
 from qtpy import QtWidgets, QtCore
 from time import perf_counter
@@ -47,7 +47,7 @@ class DAQ_2DViewer_AndorShutter_PMD5(DAQ_Viewer_base, DAQ_Move_VLM1):
              {'title': 'Acquisition', 'name': 'acq', 'type': 'group', 'children':
                  [{'title': 'Acquisition mode:', 'name': 'acq_mode', 'type': 'list', 'limits': ['Normal', 'Fast 1D']},#'Spectrum', 'Differential', 'Sequence'], 'value':'Spectrum'},
                   {'title': 'Fast mode:', 'name': 'fast_mode', 'type': 'list', 'limits': ['Spectrum', 'Differential']},
-                  #{'title': 'Display:', 'name': 'display', 'type': 'list', 'limits': ['Average', '2D'], 'value':'Average'},
+                  {'title': 'Display:', 'name': 'display', 'type': 'list', 'limits': ['Average', '2D'], 'value':'Average'},
                   {'title': 'Differential type:', 'name': 'diff_type', 'type': 'list', 'limits': ['dR/R', 'dOD'], 'visible':False},
                   {'title': 'Bit depth:', 'name': 'bit_depth', 'type': 'list', 'limits': ['Fastest frame rate (12-bit)', 'High dynamic range (16-bit)']}]
               },
@@ -169,7 +169,6 @@ class DAQ_2DViewer_AndorShutter_PMD5(DAQ_Viewer_base, DAQ_Move_VLM1):
         # ---
         elif param.name() == "update_roi":
             if param.value():  # Switching on ROI
-
                 # We handle ROI and binning separately for clarity
                 (old_x, _, old_y, _, xbin, ybin) = self.controller.get_roi()  # Get current binning
 
@@ -281,7 +280,7 @@ class DAQ_2DViewer_AndorShutter_PMD5(DAQ_Viewer_base, DAQ_Move_VLM1):
             self.settings.child("camera_settings",'timing_opts', 'chunk_size').show()
             #self.settings.child("camera_settings",'trigger', 'trigger_mode').setValue('External')
             self.settings.child("camera_settings",'dev').show()
-            # self.settings.child("camera_settings",'acq','display').show()
+            self.settings.child("camera_settings",'acq','display').show()
 
             if fast_mode == 'Differential':
                 self.settings.child("camera_settings",'acq','diff_type').show()
@@ -446,20 +445,20 @@ class DAQ_2DViewer_AndorShutter_PMD5(DAQ_Viewer_base, DAQ_Move_VLM1):
                 self.axes = [self.x_axis]
 
         else:  # FAST MODE
-            # if self.settings["camera_settings",'acq','display'] == '2D':   # spectra are shown in 2D
-            #     data_shape = 'Data2D'
-            #     nchunk = self.settings["camera_settings",'timing_opts','chunk_size']
-            #     if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
-            #         nchunk = int(nchunk/2)
-            #     self.y_axis = Axis(data=np.linspace(0, nchunk, nchunk, endpoint=False), label='Shot', index=0)
-            #     self.axes = [self.x_axis, self.y_axis]
-            #     mock_data = np.zeros((nchunk, width))
-            #
-            # else: # this is in 1D:
-            data_shape = 'Data1D'
-            self.x_axis.index = 0
-            self.axes = [self.x_axis]
-            mock_data = np.zeros((width,))
+            if self.settings["camera_settings",'acq','display'] == '2D':   # spectra are shown in 2D
+                data_shape = 'Data2D'
+                nchunk = self.settings["camera_settings",'timing_opts','chunk_size']
+                if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
+                    nchunk = int(nchunk/2)
+                self.y_axis = Axis(data=np.linspace(0, nchunk, nchunk, endpoint=False), label='Shot', index=0)
+                self.axes = [self.x_axis, self.y_axis]
+                mock_data = np.zeros((nchunk, width))
+
+            else: # this is in 1D:
+                data_shape = 'Data1D'
+                self.x_axis.index = 0
+                self.axes = [self.x_axis]
+                mock_data = np.zeros((width,))
 
         self.data_shape = data_shape
         dte = [DataFromPlugins(name='Camera Image',
@@ -544,7 +543,6 @@ class DAQ_2DViewer_AndorShutter_PMD5(DAQ_Viewer_base, DAQ_Move_VLM1):
         try:
             if self.settings["camera_settings",'acq','fast_mode'] == 'Differential':
                 self.move_abs(int(self.settings["camera_settings", "dev", "on_before_off"]))  # Open or Close shutter depending on setting
-
                 QtCore.QThread.msleep(16)
 
             if not self.controller.acquisition_in_progress():
