@@ -1,0 +1,54 @@
+[features]
+instruments = true
+extensions = false
+models = false
+h5exporters = false
+scanners = false
+
+[urls]
+package-url = "https://github.com/yourname/pymodaq_plugins_maranax"
+
+[project]
+name = "pymodaq_plugins_fab1b"
+description = "PyMoDAQ 5.2 plugin for Andor Marana-X cameras using native Andor SDK3"
+dependencies = [
+    "pymodaq>=5.2.0,<5.3.0",
+    "pymodaq_utils>=5.2.0,<5.3.0",
+    "pymodaq_gui>=5.2.0,<5.3.0",
+    "pymodaq_data>=5.2.0,<5.3.0",
+    "numpy>=1.23",
+]
+authors = [
+    {name = "Romain Genx"},
+]
+maintainers = [
+    {name = "Romain Genx"},
+]
+dynamic = ["version", "urls", "entry-points"]
+readme = "README.rst"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+]
+
+[build-system]
+requires = [
+    "hatchling>=1.9.0",
+    "hatch-vcs",
+    "toml",
+    "pymodaq_utils>=0.0.6",
+]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata.hooks.custom]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.metadata]
+allow-direct-references = true

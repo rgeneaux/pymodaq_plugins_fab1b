@@ -1,88 +1,55 @@
-pymodaq_plugins_template
-########################
+pymodaq_plugins_maranax
+=======================
 
-.. the following must be adapted to your developed package, links to pypi, github  description...
+PyMoDAQ 5.2 plugin for Andor Marana-X cameras using the native Andor SDK3
+``atcore`` API.
 
-.. image:: https://img.shields.io/pypi/v/pymodaq_plugins_template.svg
-   :target: https://pypi.org/project/pymodaq_plugins_template/
-   :alt: Latest Version
+This project is intentionally independent of PyLabLib for acquisition. The
+camera is configured through SDK3 features and images are acquired using the
+native AT_QueueBuffer / AT_WaitBuffer interface.
 
-.. image:: https://readthedocs.org/projects/pymodaq/badge/?version=latest
-   :target: https://pymodaq.readthedocs.io/en/stable/?badge=latest
-   :alt: Documentation Status
+Current status
+--------------
 
-.. image:: https://github.com/PyMoDAQ/pymodaq_plugins_template/workflows/Upload%20Python%20Package/badge.svg
-   :target: https://github.com/PyMoDAQ/pymodaq_plugins_template
-   :alt: Publication Status
+* Native SDK3 ctypes wrapper.
+* Native SDK3 circular buffer.
+* Mono16 zero-copy NumPy view of the SDK buffer.
+* One controlled copy from the SDK buffer into a PyMoDAQ-owned frame buffer.
+* Dedicated acquisition thread.
+* ROI and exposure control.
+* Continuous/live acquisition.
+* Basic frame-rate and dropped-frame accounting.
 
-.. image:: https://github.com/PyMoDAQ/pymodaq_plugins_template/actions/workflows/Test.yml/badge.svg
-    :target: https://github.com/PyMoDAQ/pymodaq_plugins_template/actions/workflows/Test.yml
+The current implementation deliberately uses Mono16 as the acquisition
+encoding. Mono12Packed conversion can be added once the exact Marana-X
+firmware/SDK combination has been tested.
 
+Installation
+------------
 
-Use this template to create a repository on your account and start the development of your own PyMoDAQ plugin!
+Install the package in editable mode in the same environment as PyMoDAQ::
 
+    pip install -e .
 
-Authors
-=======
+Install the Andor SDK3 software supplied with the camera. The ``atcore.dll``
+must be discoverable by the process, or its full path can be selected in the
+PyMoDAQ settings.
 
-* First Author  (myemail@xxx.org)
-* Other author (myotheremail@xxx.org)
+The code has not been tested against every SDK3 release. Verify the installed
+SDK3 version and the Marana-X firmware before using it for unattended
+acquisition.
 
-.. if needed use this field
+Performance design
+------------------
 
-    Contributors
-    ============
+The acquisition path is::
 
-    * First Contributor
-    * Other Contributors
+    Marana-X -> SDK3 -> preallocated native buffers -> AT_WaitBuffer
+              -> NumPy view -> PyMoDAQ-owned frame -> dte_signal
 
-.. if needed use this field
+The SDK buffer is returned immediately after the copy. It is therefore never
+held by the GUI. The PyMoDAQ-facing frame has independent ownership.
 
-  Depending on the plugin type, delete/complete the fields below
-
-
-Instruments
-===========
-
-Below is the list of instruments included in this plugin
-
-Actuators
-+++++++++
-
-* **yyy**: control of yyy actuators
-* **xxx**: control of xxx actuators
-
-Viewer0D
-++++++++
-
-* **yyy**: control of yyy 0D detector
-* **xxx**: control of xxx 0D detector
-
-Viewer1D
-++++++++
-
-* **yyy**: control of yyy 1D detector
-* **xxx**: control of xxx 1D detector
-
-
-Viewer2D
-++++++++
-
-* **yyy**: control of yyy 2D detector
-* **xxx**: control of xxx 2D detector
-
-
-PID Models
-==========
-
-
-Extensions
-==========
-
-
-Installation instructions
-=========================
-
-* PyMoDAQ’s version.
-* Operating system’s version.
-* What manufacturer’s drivers should be installed to make this plugin run?
+For maximum acquisition throughput, keep processing out of the Qt slot
+connected to ``frame_ready``. A future high-throughput recorder should consume
+the acquisition frames in a separate producer/consumer queue.
