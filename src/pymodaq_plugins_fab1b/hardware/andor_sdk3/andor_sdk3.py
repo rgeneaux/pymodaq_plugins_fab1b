@@ -46,6 +46,27 @@ AT_HANDLE_SYSTEM = 1
 AT_TRUE = 1
 AT_FALSE = 0
 
+# The host-side numpy dtype each PixelEncoding decodes to. Mono12 and
+# Mono12Packed both end up as uint16 (Mono12 is already stored unpacked, one
+# 12-bit value per 16-bit word; Mono12Packed is unpacked into the same
+# container by SDK3BufferPool.frame_view).
+PIXEL_ENCODING_DTYPES = {
+    "Mono16": np.uint16,
+    "Mono12": np.uint16,
+    "Mono12Packed": np.uint16,
+    "Mono32": np.uint32,
+}
+
+# Raw SDK3 wire size per pixel, i.e. what ImageSizeBytes/AOIStride actually
+# reflect - distinct from PIXEL_ENCODING_DTYPES above, which is the *decoded*
+# host-side size. Only Mono12Packed differs (3 bytes per 2 pixels).
+PIXEL_ENCODING_RAW_BYTES_PER_PIXEL = {
+    "Mono16": 2.0,
+    "Mono12": 2.0,
+    "Mono12Packed": 1.5,
+    "Mono32": 4.0,
+}
+
 
 class SDK3Error(RuntimeError):
     """An error returned by the Andor SDK3 API."""
@@ -531,26 +552,69 @@ class SDK3BufferPool:
             ) from exc
 
     @staticmethod
-    def as_mono16_view(buf, width, height, stride):
-        """Return a view of the SDK buffer, respecting AOIStride padding."""
-        if stride % 2:
+    def frame_view(buf, width, height, stride, pixel_encoding):
+        """Return a view/array of the SDK buffer for the given PixelEncoding.
+
+        Respects AOIStride padding. Mono16/Mono12/Mono32 are "dense": a fixed
+        number of bytes per pixel, so this returns a real *view* into the
+        SDK3 buffer with no copy. Mono12Packed is bit-packed (3 bytes per 2
+        pixels) and must be unpacked into a new array; there is no way to
+        alias that as a view.
+        """
+        if pixel_encoding in SDK3BufferPool._DENSE_DTYPES:
+            return SDK3BufferPool._dense_view(
+                buf, width, height, stride, SDK3BufferPool._DENSE_DTYPES[pixel_encoding]
+            )
+        if pixel_encoding == "Mono12Packed":
+            return SDK3BufferPool._mono12packed_array(buf, width, height, stride)
+        raise RuntimeError(f"PixelEncoding {pixel_encoding!r} is not supported")
+
+    _DENSE_DTYPES = {"Mono16": np.uint16, "Mono12": np.uint16, "Mono32": np.uint32}
+
+    @staticmethod
+    def _dense_view(buf, width, height, stride, dtype):
+        itemsize = np.dtype(dtype).itemsize
+        if stride % itemsize:
             raise RuntimeError(
-                f"Mono16 AOIStride={stride} is not divisible by 2"
+                f"AOIStride={stride} is not divisible by the {itemsize}-byte pixel size"
             )
 
-        n_words_per_row = stride // 2
+        n_items_per_row = stride // itemsize
         raw = (ctypes.c_ubyte * buf.size).from_address(buf.address)
-        flat = np.ctypeslib.as_array(raw).view(np.uint16)
+        flat = np.ctypeslib.as_array(raw).view(dtype)
 
-        if flat.size < n_words_per_row * height:
+        if flat.size < n_items_per_row * height:
             raise RuntimeError(
                 "SDK3 ImageSizeBytes is smaller than AOIStride*AOIHeight"
             )
 
-        image_with_padding = flat[:n_words_per_row * height].reshape(
-            height, n_words_per_row
+        image_with_padding = flat[:n_items_per_row * height].reshape(
+            height, n_items_per_row
         )
         return image_with_padding[:, :width]
+
+    @staticmethod
+    def _mono12packed_array(buf, width, height, stride):
+        # Andor's Mono12Packed layout, 2 pixels per 3 bytes (little-endian):
+        #   byte0 = px0[7:0]
+        #   byte1 = px1[3:0] << 4 | px0[11:8]
+        #   byte2 = px1[11:4]
+        raw = (ctypes.c_ubyte * buf.size).from_address(buf.address)
+        flat = np.ctypeslib.as_array(raw)
+
+        if flat.size < stride * height:
+            raise RuntimeError(
+                "SDK3 ImageSizeBytes is smaller than AOIStride*AOIHeight"
+            )
+
+        rows = flat[:stride * height].reshape(height, stride).astype(np.uint16)
+        fst, mid, lst = rows[:, 0::3], rows[:, 1::3], rows[:, 2::3]
+        n_pairs = min(mid.shape[1], lst.shape[1])
+
+        unpacked = np.empty((height, 2 * n_pairs), dtype=np.uint16)
+        unpacked[:, 0::2] = (fst[:, :n_pairs] << 4) | (mid[:, :n_pairs] & 0x0F)
+        unpacked[:, 1::2] = (mid[:, :n_pairs] >> 4) | (lst[:, :n_pairs] << 4)
+        return unpacked[:, :width]
 
 
 class AndorSDK3Camera:
@@ -657,8 +721,11 @@ class AndorSDK3Camera:
         if self.acquiring:
             raise RuntimeError("Cannot configure while acquiring")
 
-        # Mono16 is the initial high-throughput path. We intentionally do not
-        # silently unpack packed 12-bit data here.
+        if pixel_encoding not in PIXEL_ENCODING_DTYPES:
+            raise RuntimeError(
+                f"Unsupported PixelEncoding {pixel_encoding!r}; supported: "
+                f"{sorted(PIXEL_ENCODING_DTYPES)}"
+            )
         self.set_enum("PixelEncoding", pixel_encoding)
         self.set_enum("CycleMode", cycle_mode)
 
@@ -688,12 +755,6 @@ class AndorSDK3Camera:
             self.set_float("FrameRate", frame_rate)
 
         self._read_geometry()
-
-        if self.pixel_encoding != "Mono16":
-            raise RuntimeError(
-                f"Only Mono16 is implemented in this first version; "
-                f"camera reports {self.pixel_encoding!r}"
-            )
 
         self.buffer_pool = SDK3BufferPool(
             self.sdk,
@@ -735,12 +796,18 @@ class AndorSDK3Camera:
         return self.buffer_pool.find(address), size
 
     def frame_view(self, buffer):
-        return self.buffer_pool.as_mono16_view(
+        return self.buffer_pool.frame_view(
             buffer,
             self.width,
             self.height,
             self.stride,
+            self.pixel_encoding,
         )
+
+    @property
+    def pixel_dtype(self):
+        """The host-side numpy dtype frame_view() decodes to."""
+        return PIXEL_ENCODING_DTYPES[self.pixel_encoding]
 
     def requeue(self, buffer):
         self.sdk.queue_buffer(

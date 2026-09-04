@@ -15,7 +15,11 @@ from pymodaq.utils.data import Axis, DataFromPlugins
 from pymodaq_data.data import DataToExport
 from pymodaq_utils.utils import ThreadCommand
 
-from pymodaq_plugins_fab1b.hardware.andor_sdk3 import AndorSDK3Camera
+from pymodaq_plugins_fab1b.hardware.andor_sdk3 import (
+    AndorSDK3Camera,
+    PIXEL_ENCODING_DTYPES,
+    PIXEL_ENCODING_RAW_BYTES_PER_PIXEL,
+)
 
 
 class MaranaXAcquisitionWorker(QtCore.QObject):
@@ -73,6 +77,10 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
         # NxN block binning up to 8x8), so a full-height sum has to be done
         # on the host, after each frame is read out.
         self.vertical_binning = vertical_binning
+        # uint32 is plenty of headroom for a uint16 source (Mono16/Mono12/
+        # Mono12Packed), but summing an already-uint32 source (Mono32) needs
+        # a wider accumulator to avoid overflow.
+        self._sum_dtype = np.uint64 if camera.pixel_dtype == np.uint32 else np.uint32
         self._stop_event = threading.Event()
 
     @QtCore.Slot()
@@ -120,7 +128,7 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
                     # camera-owned memory.
                     view = self.camera.frame_view(buffer)
                     if self.vertical_binning:
-                        image = view.sum(axis=0, dtype=np.uint32)
+                        image = view.sum(axis=0, dtype=self._sum_dtype)
                     else:
                         image = np.array(view, copy=True)
                     self.frame_ready.emit(image)
@@ -147,9 +155,9 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
         total_captured = 0
 
         if self.vertical_binning:
-            chunk_shape, chunk_dtype = (self.chunk_size, width), np.uint32
+            chunk_shape, chunk_dtype = (self.chunk_size, width), self._sum_dtype
         else:
-            chunk_shape, chunk_dtype = (self.chunk_size, height, width), np.uint16
+            chunk_shape, chunk_dtype = (self.chunk_size, height, width), self.camera.pixel_dtype
 
         while not self._stop_event.is_set():
             # A fresh array per chunk: the previous one is now owned by
@@ -172,7 +180,7 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
                 try:
                     view = self.camera.frame_view(buffer)
                     if self.vertical_binning:
-                        chunk[filled] = view.sum(axis=0, dtype=np.uint32)
+                        chunk[filled] = view.sum(axis=0, dtype=self._sum_dtype)
                     else:
                         chunk[filled] = view
                     filled += 1
@@ -258,6 +266,14 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             "type": "list",
             "limits": ["Mono16"],
             "value": "Mono16",
+            "tip": "Limits are populated from the camera's actual supported "
+            "encodings on init. Measured on this camera (benchmark_maranax.py "
+            "--pixel-encoding all): Mono12Packed is the fastest, ~7% above "
+            "Mono16, from its 25% smaller data volume; Mono12 (stored "
+            "unpacked, same size as Mono16) makes no difference; Mono32 is "
+            "dramatically slower, to ~25% of Mono16's throughput regardless "
+            "of AOI size - SDK3's own ReadoutTime/FrameRate features report "
+            "the same values for all encodings and do not predict this.",
         },
         {
             "title": "Acquisition mode:",
@@ -462,13 +478,20 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
     def _max_allocation_bytes(self):
         return int(self.settings["safety", "max_allocation_mb"]) * 1024**2
 
-    def _buffer_pool_bytes(self, width=None, height=None, n_buffers=None):
+    def _buffer_pool_bytes(self, width=None, height=None, n_buffers=None, pixel_encoding=None):
         width = int(width if width is not None else self.settings["aoi", "width"])
         height = int(height if height is not None else self.settings["aoi", "height"])
         n_buffers = int(n_buffers if n_buffers is not None else self.settings["n_buffers"])
-        return n_buffers * width * height * 2  # Mono16 = 2 bytes/px
+        pixel_encoding = pixel_encoding or self.settings["pixel_encoding"]
+        # This is the raw SDK3 wire size (what ImageSizeBytes/AOIStride
+        # actually are), not the decoded host-side size below - only
+        # Mono12Packed differs between the two.
+        bytes_per_px = PIXEL_ENCODING_RAW_BYTES_PER_PIXEL.get(pixel_encoding, 2.0)
+        return int(n_buffers * width * height * bytes_per_px)
 
-    def _chunk_bytes(self, chunk_size=None, width=None, height=None, vertical_binning=None):
+    def _chunk_bytes(
+        self, chunk_size=None, width=None, height=None, vertical_binning=None, pixel_encoding=None
+    ):
         chunk_size = int(chunk_size if chunk_size is not None else self.settings["chunk_size"])
         width = int(width if width is not None else self.settings["aoi", "width"])
         height = int(height if height is not None else self.settings["aoi", "height"])
@@ -477,9 +500,15 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             if vertical_binning is not None
             else self.settings["vertical_binning"]
         )
+        pixel_encoding = pixel_encoding or self.settings["pixel_encoding"]
+        decoded_dtype = PIXEL_ENCODING_DTYPES.get(pixel_encoding, np.uint16)
         if vertical_binning:
-            return chunk_size * width * 4  # one uint32 trace per frame
-        return chunk_size * height * width * 2  # uint16 stack
+            # One binned trace per frame; the accumulator is uint32, except
+            # for an already-uint32 source (Mono32), which sums into uint64
+            # to avoid overflow.
+            accum_itemsize = 8 if decoded_dtype == np.uint32 else 4
+            return chunk_size * width * accum_itemsize
+        return chunk_size * height * width * np.dtype(decoded_dtype).itemsize
 
     def _update_memory_estimates(self):
         if self.camera is None:
@@ -492,13 +521,15 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             self._format_bytes(self._chunk_bytes())
         )
 
-    def _check_buffer_pool_size(self, width, height, n_buffers):
+    def _check_buffer_pool_size(self, width, height, n_buffers, pixel_encoding=None):
         """Refuse rather than allocate an oversized SDK3 buffer pool.
 
         Returns True if within the safety limit; otherwise reports a clear
         status message and returns False, leaving the camera unconfigured.
         """
-        size = self._buffer_pool_bytes(width=width, height=height, n_buffers=n_buffers)
+        size = self._buffer_pool_bytes(
+            width=width, height=height, n_buffers=n_buffers, pixel_encoding=pixel_encoding
+        )
         limit = self._max_allocation_bytes()
         if size > limit:
             self._set_status(
@@ -529,6 +560,19 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             info = self.camera.device_info()
             self.settings.child("camera_info", "model").setValue(info.get("CameraModel", ""))
             self.settings.child("camera_info", "serial").setValue(info.get("SerialNumber", ""))
+
+            # Restrict to encodings this wrapper actually knows how to decode
+            # (PIXEL_ENCODING_DTYPES) - in practice the same set the camera
+            # reports, but this stays safe if a future camera adds one we
+            # haven't implemented a decoder for.
+            available_encodings = [
+                enc
+                for enc in self.camera.enum_values("PixelEncoding")
+                if enc in PIXEL_ENCODING_DTYPES
+            ]
+            self.settings.child("pixel_encoding").setLimits(available_encodings)
+            if self.settings["pixel_encoding"] not in available_encodings:
+                self.settings.child("pixel_encoding").setValue(available_encodings[0])
 
             # Use the camera's current AOI as the initial GUI state, bounded
             # to the physical sensor.
@@ -656,19 +700,21 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
         # swap viewer types before then.
         vbin = self.settings["vertical_binning"]
         height, width = self.camera.height, self.camera.width
+        dtype = self.camera.pixel_dtype
+        sum_dtype = np.uint64 if dtype == np.uint32 else np.uint32
 
         if self.settings["acquisition_mode"] == "Chunked":
             placeholder = (
-                np.zeros((1, width), dtype=np.uint32)
+                np.zeros((1, width), dtype=sum_dtype)
                 if vbin
-                else np.zeros((1, height, width), dtype=np.uint16)
+                else np.zeros((1, height, width), dtype=dtype)
             )
             dwa = self._wrap_chunk(placeholder)
         else:
             placeholder = (
-                np.zeros((width,), dtype=np.uint32)
+                np.zeros((width,), dtype=sum_dtype)
                 if vbin
-                else np.zeros((height, width), dtype=np.uint16)
+                else np.zeros((height, width), dtype=dtype)
             )
             dwa = self._wrap_single(placeholder)
 
