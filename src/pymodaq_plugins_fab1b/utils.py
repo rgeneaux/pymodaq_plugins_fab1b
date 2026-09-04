@@ -7,6 +7,7 @@ Created the 31/08/2023
 from pathlib import Path
 
 from pymodaq.utils.config import BaseConfig, USER
+from pymodaq_utils.logger import set_logger, get_module_name
 
 
 class Config(BaseConfig):
