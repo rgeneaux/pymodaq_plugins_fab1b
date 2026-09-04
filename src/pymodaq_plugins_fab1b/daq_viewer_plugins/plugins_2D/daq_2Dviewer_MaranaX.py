@@ -443,7 +443,7 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             "type": "group",
             "children": [
                 {"title": "Left:", "name": "left", "type": "int", "value": 1, "min": 1},
-                {"title": "Top:", "name": "top", "type": "int", "value": 1, "min": 1},
+                {"title": "Bottom:", "name": "top", "type": "int", "value": 1, "min": 1},
                 {"title": "Width:", "name": "width", "type": "int", "value": 2048, "min": 1},
                 {"title": "Height:", "name": "height", "type": "int", "value": 2048, "min": 1},
             ],
