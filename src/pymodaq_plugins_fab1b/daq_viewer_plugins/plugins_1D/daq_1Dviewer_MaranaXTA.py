@@ -192,6 +192,7 @@ class DAQ_1DViewer_MaranaXTA(DAQ_2DViewer_MaranaX):
             pixel_encoding=self.settings["pixel_encoding"],
             exposure_s=self.settings["timing", "exposure"] * 1e-3,
             frame_rate=self.settings["timing", "frame_rate"],
+            trigger_mode=self.settings["trigger_mode"],
             enable_metadata=True,
         )
         self._sync_timing_settings()

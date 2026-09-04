@@ -786,6 +786,7 @@ class AndorSDK3Camera:
         cycle_mode="Continuous",
         frame_rate=None,
         enable_metadata=False,
+        trigger_mode=None,
     ):
         if self.acquiring:
             raise RuntimeError("Cannot configure while acquiring")
@@ -797,6 +798,12 @@ class AndorSDK3Camera:
             )
         self.set_enum("PixelEncoding", pixel_encoding)
         self.set_enum("CycleMode", cycle_mode)
+
+        # Before ExposureTime/FrameRate below: which of those two are
+        # writable depends on TriggerMode (e.g. FrameRate isn't writable
+        # under "External" - the external TTL sets the rate, not us).
+        if trigger_mode is not None:
+            self.set_enum("TriggerMode", trigger_mode)
 
         # Must happen before the final _read_geometry() below: ImageSizeBytes
         # only grows to include the metadata trailer (e.g. the per-frame
@@ -821,12 +828,22 @@ class AndorSDK3Camera:
         # exposure before FrameRate matters too: FrameRateMax is bounded by
         # the *current* exposure, so a stale long exposure silently caps how
         # high FrameRate can be pushed.
-        if exposure_s is not None:
+        #
+        # Both are skipped rather than raising if not currently writable
+        # (e.g. FrameRate under "External" trigger mode - the TTL sets the
+        # rate; ExposureTime under "External Exposure" - the pulse width
+        # sets it): this configure() call didn't ask to change trigger mode
+        # specifically, it's a routine AOI/encoding/etc. reconfigure that
+        # happens to also resend exposure/frame_rate, so silently leaving
+        # them alone is correct here. A deliberate, direct
+        # set_float("ExposureTime"/"FrameRate", ...) elsewhere still raises
+        # normally, which is the right behaviour for that.
+        if exposure_s is not None and self.is_writable("ExposureTime"):
             if exposure_s == "min":
                 exposure_s = self.sdk.get_float_min(self.handle, "ExposureTime")
             self.set_float("ExposureTime", exposure_s)
 
-        if frame_rate is not None:
+        if frame_rate is not None and self.is_writable("FrameRate"):
             if frame_rate == "max":
                 frame_rate = self.sdk.get_float_max(self.handle, "FrameRate")
             self.set_float("FrameRate", frame_rate)

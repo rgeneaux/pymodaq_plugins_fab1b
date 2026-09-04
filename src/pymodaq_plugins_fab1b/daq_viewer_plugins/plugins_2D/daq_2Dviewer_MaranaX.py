@@ -402,6 +402,20 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             "the same values for all encodings and do not predict this.",
         },
         {
+            "title": "Trigger mode:",
+            "name": "trigger_mode",
+            "type": "list",
+            "limits": ["Internal"],
+            "value": "Internal",
+            "tip": "Limits are populated from the camera's actual supported "
+            "modes on init. Internal: camera free-runs at Frame rate below. "
+            "External: an external TTL into the camera's trigger input (e.g. "
+            "the laser sync, at the laser repetition rate) starts each "
+            "exposure, with a fixed duration set by Exposure - Frame rate "
+            "becomes read-only, since the TTL sets the rate, not the camera. "
+            "Requires stopping any running acquisition first.",
+        },
+        {
             "title": "Acquisition mode:",
             "name": "acquisition_mode",
             "type": "list",
@@ -700,6 +714,11 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             if self.settings["pixel_encoding"] not in available_encodings:
                 self.settings.child("pixel_encoding").setValue(available_encodings[0])
 
+            available_trigger_modes = self.camera.enum_values("TriggerMode")
+            self.settings.child("trigger_mode").setLimits(available_trigger_modes)
+            if self.settings["trigger_mode"] not in available_trigger_modes:
+                self.settings.child("trigger_mode").setValue(available_trigger_modes[0])
+
             # Use the camera's current AOI as the initial GUI state, bounded
             # to the physical sensor.
             self.settings.child("aoi", "left").setOpts(max=self.camera.sensor_width)
@@ -753,22 +772,25 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             pixel_encoding=self.settings["pixel_encoding"],
             exposure_s=self.settings["timing", "exposure"] * 1e-3,
             frame_rate=self.settings["timing", "frame_rate"],
+            trigger_mode=self.settings["trigger_mode"],
         )
         self._sync_timing_settings()
 
     def _sync_timing_settings(self):
-        """Refresh exposure/frame-rate GUI bounds and values from hardware.
+        """Refresh exposure/frame-rate GUI bounds, values, and read-only
+        state (which depends on TriggerMode, e.g. FrameRate is read-only
+        under "External") from hardware.
 
         ExposureTime and FrameRate bound each other, and both bounds depend
         on the current AOI, so this must be called after any AOI, pixel
-        encoding, or exposure change.
+        encoding, exposure, or trigger mode change.
         """
         handle = self.camera.handle
 
         exp_min = self.camera.sdk.get_float_min(handle, "ExposureTime")
         exp_max = self.camera.sdk.get_float_max(handle, "ExposureTime")
         self.settings.child("timing", "exposure").setOpts(
-            min=exp_min * 1e3, max=exp_max * 1e3
+            min=exp_min * 1e3, max=exp_max * 1e3, readonly=not self.camera.is_writable("ExposureTime")
         )
         self.settings.child("timing", "exposure").setValue(
             self.camera.get_float("ExposureTime") * 1e3
@@ -776,7 +798,9 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
 
         fr_min = self.camera.sdk.get_float_min(handle, "FrameRate")
         fr_max = self.camera.sdk.get_float_max(handle, "FrameRate")
-        self.settings.child("timing", "frame_rate").setOpts(min=fr_min, max=fr_max)
+        self.settings.child("timing", "frame_rate").setOpts(
+            min=fr_min, max=fr_max, readonly=not self.camera.is_writable("FrameRate")
+        )
         self.settings.child("timing", "frame_rate").setValue(
             self.camera.get_float("FrameRate")
         )
@@ -889,11 +913,11 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
                     )
                     self.settings.child("timing", "set_max_frame_rate").setValue(False)
 
-            elif name in {"left", "top", "width", "height", "pixel_encoding", "n_buffers"}:
+            elif name in {"left", "top", "width", "height", "pixel_encoding", "n_buffers", "trigger_mode"}:
                 if self.running:
                     self._set_status(
                         "Stop the live acquisition before changing AOI, pixel "
-                        "encoding, or buffer count."
+                        "encoding, buffer count, or trigger mode."
                     )
                     return
 
