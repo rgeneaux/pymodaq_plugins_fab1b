@@ -617,12 +617,70 @@ class SDK3BufferPool:
         return unpacked[:, :width]
 
 
+class SDK3UtilityLibrary:
+    """Thin ctypes wrapper around atutility.dll.
+
+    Distinct from atcore.dll: this is where SDK3 puts its metadata-parsing
+    helpers (AT_GetTimeStampFromMetadata etc.), rather than exposing them on
+    the core library. Always installed alongside atcore.dll.
+    """
+
+    def __init__(self, dll_path):
+        self.dll_path = dll_path
+        self._lock = threading.RLock()
+        self.lib = ctypes.WinDLL(dll_path) if platform.system() == "Windows" else ctypes.CDLL(dll_path)
+        self._initialised = False
+        self._configure_api()
+
+    def _configure_api(self):
+        lib = self.lib
+        lib.AT_InitialiseUtilityLibrary.argtypes = []
+        lib.AT_InitialiseUtilityLibrary.restype = ctypes.c_int
+        lib.AT_FinaliseUtilityLibrary.argtypes = []
+        lib.AT_FinaliseUtilityLibrary.restype = ctypes.c_int
+
+        lib.AT_GetTimeStampFromMetadata.argtypes = [
+            ctypes.POINTER(AT_U8), AT_64, ctypes.POINTER(AT_64)
+        ]
+        lib.AT_GetTimeStampFromMetadata.restype = ctypes.c_int
+
+    @_locked
+    def initialise(self):
+        if not self._initialised:
+            SDK3Library.check(self.lib.AT_InitialiseUtilityLibrary(), "AT_InitialiseUtilityLibrary")
+            self._initialised = True
+
+    @_locked
+    def finalise(self):
+        if self._initialised:
+            SDK3Library.check(self.lib.AT_FinaliseUtilityLibrary(), "AT_FinaliseUtilityLibrary")
+            self._initialised = False
+
+    @_locked
+    def get_timestamp_from_metadata(self, address, size):
+        """Extract the per-frame hardware timestamp (in TimestampClock ticks).
+
+        ``address``/``size`` are the buffer address and *total* size
+        (image + metadata trailer) as returned by AT_WaitBuffer - the same
+        pair SDK3Library.wait_buffer() already returns, not the plain
+        ImageSizeBytes.
+        """
+        ptr = ctypes.cast(address, ctypes.POINTER(AT_U8))
+        timestamp = AT_64()
+        SDK3Library.check(
+            self.lib.AT_GetTimeStampFromMetadata(ptr, AT_64(size), ctypes.byref(timestamp)),
+            "AT_GetTimeStampFromMetadata",
+        )
+        return int(timestamp.value)
+
+
 class AndorSDK3Camera:
     """Marana-X-oriented camera wrapper using native SDK3."""
 
     def __init__(self, index=0, dll_path=None, n_buffers=32):
         self.index = index
         self.sdk = SDK3Library(dll_path)
+        self.utility = SDK3UtilityLibrary(self._sibling_dll_path(self.sdk.dll_path, "atutility.dll"))
         self.handle = None
         self.n_buffers = int(n_buffers)
         self.buffer_pool = None
@@ -637,14 +695,23 @@ class AndorSDK3Camera:
         self.stride = None
         self.image_size_bytes = None
         self.pixel_encoding = None
+        self.metadata_enabled = False
+
+    @staticmethod
+    def _sibling_dll_path(dll_path, sibling_name):
+        """atutility.dll is always installed next to atcore.dll."""
+        directory = os.path.dirname(os.path.abspath(dll_path))
+        return os.path.join(directory, sibling_name) if directory else sibling_name
 
     def open(self):
         self.sdk.initialise()
+        self.utility.initialise()
         try:
             self.handle = self.sdk.open(self.index)
             self._read_geometry()
         except Exception:
             self.sdk.finalise()
+            self.utility.finalise()
             raise
 
     def close(self):
@@ -656,6 +723,7 @@ class AndorSDK3Camera:
                 self.sdk.close(self.handle)
                 self.handle = None
         self.sdk.finalise()
+        self.utility.finalise()
 
     def _read_geometry(self):
         self.sensor_width = self.sdk.get_int(self.handle, "SensorWidth")
@@ -717,6 +785,7 @@ class AndorSDK3Camera:
         pixel_encoding="Mono16",
         cycle_mode="Continuous",
         frame_rate=None,
+        enable_metadata=False,
     ):
         if self.acquiring:
             raise RuntimeError("Cannot configure while acquiring")
@@ -728,6 +797,14 @@ class AndorSDK3Camera:
             )
         self.set_enum("PixelEncoding", pixel_encoding)
         self.set_enum("CycleMode", cycle_mode)
+
+        # Must happen before the final _read_geometry() below: ImageSizeBytes
+        # only grows to include the metadata trailer (e.g. the per-frame
+        # hardware timestamp) once MetadataEnable is set, and the buffer
+        # pool is sized from that value - get this backwards and every
+        # buffer is too small to hold the metadata SDK3 tries to append.
+        self.set_bool("MetadataEnable", bool(enable_metadata))
+        self.metadata_enabled = bool(enable_metadata)
 
         if roi is not None:
             left, top, width, height = map(int, roi)
@@ -808,6 +885,17 @@ class AndorSDK3Camera:
     def pixel_dtype(self):
         """The host-side numpy dtype frame_view() decodes to."""
         return PIXEL_ENCODING_DTYPES[self.pixel_encoding]
+
+    def frame_timestamp(self, buffer, size):
+        """Per-frame hardware timestamp, in TimestampClock ticks.
+
+        Requires configure(enable_metadata=True). ``size`` must be the
+        *total* size wait_frame() returned alongside this buffer (image +
+        metadata trailer), not plain ImageSizeBytes.
+        """
+        if not self.metadata_enabled:
+            raise RuntimeError("frame_timestamp() requires configure(enable_metadata=True)")
+        return self.utility.get_timestamp_from_metadata(buffer.address, size)
 
     def requeue(self, buffer):
         self.sdk.queue_buffer(

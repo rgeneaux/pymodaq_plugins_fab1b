@@ -46,12 +46,27 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
       With ``single_chunk=False`` this repeats indefinitely (Live); a few
       frames may be missed between chunks while the previous one is handed
       off and a fresh buffer allocated, never within one.
+
+    - TA-continuous (``ta_continuous=True``): for chopped pump-probe
+      acquisition driven by a DAQ_Scan stepping a delay stage between
+      single-chunk grabs. AcquisitionStart happens once and is never torn
+      down between grabs - only on an explicit stop() - because while
+      stopped, the camera (and hence this code) has zero information about
+      how many laser shots/chopper cycles elapsed during a motor move.
+      Every single shot is counted via a running index derived from SDK3's
+      free-running per-frame hardware timestamp (configure with
+      enable_metadata=True), whether its pixel data is kept or discarded,
+      so the shot's parity relative to the chopper is never lost - and any
+      gap (a stall, an SDK3 buffer drop) is detected from a timestamp jump
+      and self-corrects the running count rather than silently mislabeling
+      every shot after it. See :meth:`_run_ta_continuous`.
     """
 
     STATS_INTERVAL_S = 0.5
 
     frame_ready = QtCore.Signal(object)
     chunk_ready = QtCore.Signal(object, int)  # (n_frames, height, width) array, chunk_index
+    ta_chunk_ready = QtCore.Signal(object, int)  # (chunk_size, width) array, start_shot_parity
     stats_updated = QtCore.Signal(float, float, int)  # camera_fps, displayed_fps, frames_captured
     acquisition_error = QtCore.Signal(str)
     acquisition_stopped = QtCore.Signal()
@@ -64,6 +79,7 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
         chunk_size=None,
         single_chunk=False,
         vertical_binning=False,
+        ta_continuous=False,
     ):
         super().__init__()
         self.camera = camera
@@ -83,12 +99,47 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
         self._sum_dtype = np.uint64 if camera.pixel_dtype == np.uint32 else np.uint32
         self._stop_event = threading.Event()
 
+        self.ta_continuous = ta_continuous
+        # Set by request_chunk() (any thread) to ask the loop to start
+        # filling a real chunk instead of just counting/discarding shots.
+        # Plain ints below are read cross-thread by the plugin for status
+        # display only (eventually-consistent is fine; CPython's GIL makes
+        # individual int reads/writes safe, no lock needed).
+        self._accumulate_event = threading.Event()
+        # Set by request_chunk(), read once by the worker thread itself when
+        # it starts a *new* chunk (chunk is None below). Never mutated by
+        # the plugin thread after that point (it waits for ta_chunk_ready
+        # before requesting again), so there's no race despite crossing
+        # threads: it's set-then-read, not mutated concurrently.
+        self._requested_chunk_size = None
+        self.shots_seen = 0
+        self.shots_dropped = 0
+        self.chunks_aborted = 0
+
+    def request_chunk(self, chunk_size=None):
+        """Ask the persistent TA-continuous loop to fill and emit one chunk.
+
+        chunk_size overrides self.chunk_size for just this one request (a
+        smaller calibration/background burst) without touching the
+        persistent default used for real acquisition chunks.
+        """
+        self._requested_chunk_size = chunk_size
+        self._accumulate_event.set()
+
     @QtCore.Slot()
     def run(self):
-        self._stop_event.clear()
+        # No self._stop_event.clear() here: QThread.start() is async, so if
+        # stop() (which calls _stop_event.set()) lands before this method
+        # actually starts executing, clearing it here would silently erase
+        # that stop request the moment the thread does start, and the loop
+        # below would then run forever unaware it was ever asked to stop.
+        # Each worker is a fresh instance with a fresh (already-cleared)
+        # Event, so there's nothing to reset anyway.
         try:
             self.camera.start()
-            if self.chunk_size:
+            if self.ta_continuous:
+                self._run_ta_continuous()
+            elif self.chunk_size:
                 self._run_chunked()
             else:
                 self._run_preview()
@@ -206,6 +257,81 @@ class MaranaXAcquisitionWorker(QtCore.QObject):
 
             if self.single_chunk:
                 break
+
+    def _run_ta_continuous(self):
+        """Persistent chopped-pump-probe loop; see the class docstring.
+
+        Always vertically binned (one 1D trace per shot) - unlike
+        _run_chunked, this mode's whole purpose is per-shot chopper phase
+        tracking, which only makes sense on a single 1D trace per shot.
+        """
+        width = self.camera.width
+        chunk_dtype = self._sum_dtype
+
+        period_ticks = None
+        last_ts = None
+        shot_index = -1  # becomes 0 on the first frame ever seen
+
+        chunk = None
+        chunk_start_shot_index = None
+        current_chunk_size = None
+        filled = 0
+
+        while not self._stop_event.is_set():
+            result = self.camera.wait_frame(timeout_ms=100)
+            if result is None:
+                continue
+
+            buffer, size = result
+            try:
+                ts = self.camera.frame_timestamp(buffer, size)
+
+                if last_ts is None:
+                    shot_index += 1
+                    gap = 0
+                else:
+                    if period_ticks is None:
+                        period_ticks = (
+                            self.camera.get_int("TimestampClockFrequency")
+                            / self.camera.get_float("FrameRate")
+                        )
+                    n_elapsed = max(1, round((ts - last_ts) / period_ticks))
+                    shot_index += n_elapsed
+                    gap = n_elapsed - 1
+                last_ts = ts
+                self.shots_seen = shot_index + 1
+
+                if gap > 0:
+                    self.shots_dropped += gap
+                    if chunk is not None:
+                        # The gap broke the simple even/odd alternation this
+                        # chunk's rows were relying on - discard it rather
+                        # than risk mislabeling shots after the gap. Matches
+                        # _run_chunked's existing "partial chunk is
+                        # discarded, not emitted" behaviour.
+                        chunk = None
+                        filled = 0
+                        self.chunks_aborted += 1
+
+                if self._accumulate_event.is_set():
+                    if chunk is None:
+                        current_chunk_size = self._requested_chunk_size or self.chunk_size
+                        chunk = np.empty((current_chunk_size, width), dtype=chunk_dtype)
+                        filled = 0
+                        chunk_start_shot_index = shot_index
+
+                    view = self.camera.frame_view(buffer)
+                    chunk[filled] = view.sum(axis=0, dtype=self._sum_dtype)
+                    filled += 1
+
+                    if filled >= current_chunk_size:
+                        self.ta_chunk_ready.emit(chunk, chunk_start_shot_index % 2)
+                        self._accumulate_event.clear()
+                        chunk = None
+                # else: discard - shot_index bookkeeping above already ran,
+                # only the pixel data is skipped.
+            finally:
+                self.camera.requeue(buffer)
 
     def stop(self):
         self._stop_event.set()
@@ -595,13 +721,7 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
                     False,
                 )
 
-            self.camera.configure(
-                roi=self._roi_from_settings(),
-                pixel_encoding=self.settings["pixel_encoding"],
-                exposure_s=self.settings["timing", "exposure"] * 1e-3,
-                frame_rate=self.settings["timing", "frame_rate"],
-            )
-            self._sync_timing_settings()
+            self._reconfigure_camera()
             self._update_memory_estimates()
 
             self._emit_initial_data()
@@ -619,6 +739,22 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             int(self.settings["aoi", "width"]),
             int(self.settings["aoi", "height"]),
         )
+
+    def _reconfigure_camera(self):
+        """(Re)apply ROI/encoding/exposure/frame-rate to the camera and
+        refresh the exposure/frame-rate GUI bounds to match.
+
+        Subclasses that need extra configure() arguments (e.g.
+        enable_metadata) should override this rather than duplicating the
+        AOI/pixel_encoding/n_buffers commit_settings branch below.
+        """
+        self.camera.configure(
+            roi=self._roi_from_settings(),
+            pixel_encoding=self.settings["pixel_encoding"],
+            exposure_s=self.settings["timing", "exposure"] * 1e-3,
+            frame_rate=self.settings["timing", "frame_rate"],
+        )
+        self._sync_timing_settings()
 
     def _sync_timing_settings(self):
         """Refresh exposure/frame-rate GUI bounds and values from hardware.
@@ -770,13 +906,7 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
                 if name == "n_buffers":
                     self.camera.n_buffers = n_buffers
 
-                self.camera.configure(
-                    roi=self._roi_from_settings(),
-                    pixel_encoding=self.settings["pixel_encoding"],
-                    exposure_s=self.settings["timing", "exposure"] * 1e-3,
-                    frame_rate=self.settings["timing", "frame_rate"],
-                )
-                self._sync_timing_settings()
+                self._reconfigure_camera()
                 self._update_memory_estimates()
                 self._emit_initial_data()
 
