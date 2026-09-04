@@ -1,7 +1,10 @@
 import importlib
 from pathlib import Path
 from ...utils import set_logger
+from ... import gui_patches
 logger = set_logger('viewer1D_plugins', add_to_console=False)
+
+gui_patches.apply()
 
 for path in Path(__file__).parent.iterdir():
     try:
