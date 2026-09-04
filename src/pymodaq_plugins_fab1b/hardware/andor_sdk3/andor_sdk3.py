@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import ctypes
+import functools
+import os
 import platform
 import threading
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+
+def _locked(method):
+    """Serialize access to the SDK3 handle.
+
+    Concurrently calling into atcore.dll from two threads on the same
+    handle (e.g. a feature get/set from the GUI thread while an acquisition
+    thread is blocked inside AT_WaitBuffer) is not safe: it was observed to
+    crash the process outright rather than raise a Python exception. Every
+    method that touches self.lib must go through this.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 AT_H = ctypes.c_int
@@ -59,11 +79,26 @@ class SDK3Library:
             dll_path = "atcore.dll" if platform.system() == "Windows" else "libatcore.so.3"
 
         self.dll_path = dll_path
-        self.lib = (
-            ctypes.WinDLL(dll_path)
-            if platform.system() == "Windows"
-            else ctypes.CDLL(dll_path)
-        )
+        # Guards every call into atcore.dll for this handle; see _locked.
+        self._lock = threading.RLock()
+
+        if platform.system() == "Windows":
+            # atcore.dll dynamically loads sibling device-backend DLLs at
+            # runtime (e.g. atusb_libusb.dll for USB cameras like the
+            # Marana) via a plain LoadLibrary("name.dll") call, which is
+            # resolved through the classic PATH-based search order. Without
+            # its own directory on PATH those loads fail silently and the
+            # camera is simply never enumerated: AT_InitialiseLibrary still
+            # succeeds, but DeviceCount reads 0. os.add_dll_directory() does
+            # NOT fix this (it only affects the safe-search set, which
+            # excludes PATH), so PATH must be extended explicitly.
+            dll_dir = os.path.dirname(os.path.abspath(dll_path))
+            if dll_dir and dll_dir not in os.environ["PATH"].split(os.pathsep):
+                os.environ["PATH"] = dll_dir + os.pathsep + os.environ["PATH"]
+            self.lib = ctypes.WinDLL(dll_path)
+        else:
+            self.lib = ctypes.CDLL(dll_path)
+
         self._initialised = False
         self._configure_api()
 
@@ -193,11 +228,13 @@ class SDK3Library:
         if code != AT_SUCCESS:
             raise SDK3Error(function, code)
 
+    @_locked
     def initialise(self):
         if not self._initialised:
             self.check(self.lib.AT_InitialiseLibrary(), "AT_InitialiseLibrary")
             self._initialised = True
 
+    @_locked
     def finalise(self):
         if self._initialised:
             self.check(self.lib.AT_FinaliseLibrary(), "AT_FinaliseLibrary")
@@ -208,6 +245,7 @@ class SDK3Library:
         # integer feature on the system handle.
         return self.get_int(AT_HANDLE_SYSTEM, "DeviceCount")
 
+    @_locked
     def open(self, index=0):
         handle = AT_H()
         self.check(
@@ -216,9 +254,11 @@ class SDK3Library:
         )
         return handle
 
+    @_locked
     def close(self, handle):
         self.check(self.lib.AT_Close(handle), "AT_Close")
 
+    @_locked
     def is_implemented(self, handle, feature):
         value = AT_BOOL()
         self.check(
@@ -227,6 +267,7 @@ class SDK3Library:
         )
         return bool(value.value)
 
+    @_locked
     def is_readable(self, handle, feature):
         value = AT_BOOL()
         self.check(
@@ -235,6 +276,7 @@ class SDK3Library:
         )
         return bool(value.value)
 
+    @_locked
     def is_writable(self, handle, feature):
         value = AT_BOOL()
         self.check(
@@ -243,6 +285,7 @@ class SDK3Library:
         )
         return bool(value.value)
 
+    @_locked
     def get_int(self, handle, feature):
         value = AT_64()
         self.check(
@@ -251,12 +294,14 @@ class SDK3Library:
         )
         return int(value.value)
 
+    @_locked
     def set_int(self, handle, feature, value):
         self.check(
             self.lib.AT_SetInt(handle, _wc(feature), int(value)),
             f"AT_SetInt({feature})",
         )
 
+    @_locked
     def get_int_min(self, handle, feature):
         value = AT_64()
         self.check(
@@ -265,6 +310,7 @@ class SDK3Library:
         )
         return int(value.value)
 
+    @_locked
     def get_int_max(self, handle, feature):
         value = AT_64()
         self.check(
@@ -273,6 +319,7 @@ class SDK3Library:
         )
         return int(value.value)
 
+    @_locked
     def get_float(self, handle, feature):
         value = ctypes.c_double()
         self.check(
@@ -281,12 +328,14 @@ class SDK3Library:
         )
         return float(value.value)
 
+    @_locked
     def set_float(self, handle, feature, value):
         self.check(
             self.lib.AT_SetFloat(handle, _wc(feature), float(value)),
             f"AT_SetFloat({feature})",
         )
 
+    @_locked
     def get_float_min(self, handle, feature):
         value = ctypes.c_double()
         self.check(
@@ -295,6 +344,7 @@ class SDK3Library:
         )
         return float(value.value)
 
+    @_locked
     def get_float_max(self, handle, feature):
         value = ctypes.c_double()
         self.check(
@@ -303,6 +353,7 @@ class SDK3Library:
         )
         return float(value.value)
 
+    @_locked
     def get_bool(self, handle, feature):
         value = AT_BOOL()
         self.check(
@@ -311,12 +362,14 @@ class SDK3Library:
         )
         return bool(value.value)
 
+    @_locked
     def set_bool(self, handle, feature, value):
         self.check(
             self.lib.AT_SetBool(handle, _wc(feature), AT_TRUE if value else AT_FALSE),
             f"AT_SetBool({feature})",
         )
 
+    @_locked
     def get_enum_values(self, handle, feature, available_only=True):
         count = ctypes.c_int()
         self.check(
@@ -355,6 +408,7 @@ class SDK3Library:
             values.append(text.value)
         return values
 
+    @_locked
     def get_enum(self, handle, feature):
         index = ctypes.c_int()
         self.check(
@@ -370,12 +424,14 @@ class SDK3Library:
         )
         return text.value
 
+    @_locked
     def set_enum(self, handle, feature, value):
         self.check(
             self.lib.AT_SetEnumString(handle, _wc(feature), _wc(value)),
             f"AT_SetEnumString({feature})",
         )
 
+    @_locked
     def get_string(self, handle, feature):
         max_length = ctypes.c_int()
         self.check(
@@ -393,18 +449,21 @@ class SDK3Library:
         )
         return text.value
 
+    @_locked
     def set_string(self, handle, feature, value):
         self.check(
             self.lib.AT_SetString(handle, _wc(feature), _wc(value)),
             f"AT_SetString({feature})",
         )
 
+    @_locked
     def command(self, handle, feature):
         self.check(
             self.lib.AT_Command(handle, _wc(feature)),
             f"AT_Command({feature})",
         )
 
+    @_locked
     def queue_buffer(self, handle, address, size):
         ptr = ctypes.cast(address, ctypes.POINTER(AT_U8))
         self.check(
@@ -412,6 +471,7 @@ class SDK3Library:
             "AT_QueueBuffer",
         )
 
+    @_locked
     def wait_buffer(self, handle, timeout_ms=1000):
         pointer = ctypes.POINTER(AT_U8)()
         size = ctypes.c_int()
@@ -426,6 +486,7 @@ class SDK3Library:
         self.check(code, "AT_WaitBuffer")
         return ctypes.addressof(pointer.contents), size.value
 
+    @_locked
     def flush(self, handle):
         self.check(self.lib.AT_Flush(handle), "AT_Flush")
 
@@ -591,6 +652,7 @@ class AndorSDK3Camera:
         roi=None,
         pixel_encoding="Mono16",
         cycle_mode="Continuous",
+        frame_rate=None,
     ):
         if self.acquiring:
             raise RuntimeError("Cannot configure while acquiring")
@@ -598,9 +660,7 @@ class AndorSDK3Camera:
         # Mono16 is the initial high-throughput path. We intentionally do not
         # silently unpack packed 12-bit data here.
         self.set_enum("PixelEncoding", pixel_encoding)
-
-        if exposure_s is not None:
-            self.set_float("ExposureTime", exposure_s)
+        self.set_enum("CycleMode", cycle_mode)
 
         if roi is not None:
             left, top, width, height = map(int, roi)
@@ -611,6 +671,21 @@ class AndorSDK3Camera:
             self.set_int("AOIHeight", height)
             self.set_int("AOILeft", left)
             self.set_int("AOITop", top)
+
+        # ExposureTime/FrameRate are mutually constrained, and their bounds
+        # depend on the AOI, so both must be set after the ROI above. Setting
+        # exposure before FrameRate matters too: FrameRateMax is bounded by
+        # the *current* exposure, so a stale long exposure silently caps how
+        # high FrameRate can be pushed.
+        if exposure_s is not None:
+            if exposure_s == "min":
+                exposure_s = self.sdk.get_float_min(self.handle, "ExposureTime")
+            self.set_float("ExposureTime", exposure_s)
+
+        if frame_rate is not None:
+            if frame_rate == "max":
+                frame_rate = self.sdk.get_float_max(self.handle, "FrameRate")
+            self.set_float("FrameRate", frame_rate)
 
         self._read_geometry()
 
@@ -644,7 +719,6 @@ class AndorSDK3Camera:
         if self.buffer_pool is None:
             self.prepare()
 
-        self.sdk.set_enum(self.handle, "CycleMode", "Continuous")
         self.sdk.command(self.handle, "AcquisitionStart")
         self.acquiring = True
 

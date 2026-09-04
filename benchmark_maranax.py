@@ -51,6 +51,9 @@ def benchmark(camera, duration):
     print(f"ImageSizeBytes:  {camera.image_size_bytes}")
     print(f"AOIStride:       {camera.stride}")
     print(f"Buffers:         {camera.n_buffers}")
+    print(f"ExposureTime:    {camera.get_float('ExposureTime') * 1000:.3f} ms")
+    print(f"ReadoutTime:     {camera.get_float('ReadoutTime') * 1000:.3f} ms")
+    print(f"FrameRate (set): {camera.get_float('FrameRate'):.3f} Hz")
     print(f"Elapsed:         {elapsed:.3f} s")
     print(f"Frames:          {frames}")
     print(f"Measured FPS:    {fps:.3f}")
@@ -69,7 +72,22 @@ def main():
         metavar=("WIDTH", "HEIGHT"),
         default=None,
     )
+    parser.add_argument(
+        "--exposure",
+        default="min",
+        help="Exposure time in seconds, or 'min' for the camera's minimum "
+        "(default: min, for max-throughput benchmarking)",
+    )
+    parser.add_argument(
+        "--frame-rate",
+        default="max",
+        help="Target FrameRate in Hz, or 'max' for the ceiling given the "
+        "current AOI/exposure (default: max)",
+    )
     args = parser.parse_args()
+
+    exposure_s = args.exposure if args.exposure == "min" else float(args.exposure)
+    frame_rate = args.frame_rate if args.frame_rate == "max" else float(args.frame_rate)
 
     camera = AndorSDK3Camera(
         index=args.camera,
@@ -79,21 +97,17 @@ def main():
     camera.open()
 
     try:
+        roi = None
         if args.roi:
             width, height = args.roi
-            camera.configure(
-                roi=(
-                    camera.left,
-                    camera.top,
-                    width,
-                    height,
-                ),
-                pixel_encoding="Mono16",
-            )
-        else:
-            camera.configure(
-                pixel_encoding="Mono16"
-            )
+            roi = (camera.left, camera.top, width, height)
+
+        camera.configure(
+            roi=roi,
+            pixel_encoding="Mono16",
+            exposure_s=exposure_s,
+            frame_rate=frame_rate,
+        )
 
         benchmark(camera, args.duration)
     finally:
