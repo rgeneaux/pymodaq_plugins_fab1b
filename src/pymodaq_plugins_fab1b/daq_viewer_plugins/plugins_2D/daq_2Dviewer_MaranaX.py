@@ -387,13 +387,33 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             "max": 1024,
         },
         {
+            "title": "Gain mode:",
+            "name": "gain_mode",
+            "type": "list",
+            "limits": ["Fastest frame rate (12-bit)"],
+            "value": "Fastest frame rate (12-bit)",
+            "tip": "Limits are populated from the camera's actual supported "
+            "modes on init. This is the sensor's actual ADC mode, separate "
+            "from Pixel encoding below (which is just the wire/container "
+            "format): 'Fastest frame rate' digitizes at 12-bit (well depth "
+            "~4000-4600 ADU before clipping, measured on this camera/light "
+            "level), at 200MHz readout; 'High dynamic range' digitizes at "
+            "the sensor's full well (tens of thousands of ADU, up to the "
+            "16-bit container's 65535), at half the readout rate (100MHz) "
+            "and also drops Mono12/Mono12Packed from Pixel encoding's "
+            "choices, since there's no 12-bit ADC data to pack. Changing "
+            "this refreshes Pixel encoding's available choices. Requires "
+            "stopping any running acquisition first.",
+        },
+        {
             "title": "Pixel encoding:",
             "name": "pixel_encoding",
             "type": "list",
             "limits": ["Mono16"],
             "value": "Mono16",
             "tip": "Limits are populated from the camera's actual supported "
-            "encodings on init. Measured on this camera (benchmark_maranax.py "
+            "encodings for the current Gain mode above, on init and whenever "
+            "Gain mode changes. Measured on this camera (benchmark_maranax.py "
             "--pixel-encoding all): Mono12Packed is the fastest, ~7% above "
             "Mono16, from its 25% smaller data volume; Mono12 (stored "
             "unpacked, same size as Mono16) makes no difference; Mono32 is "
@@ -701,6 +721,14 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             self.settings.child("camera_info", "model").setValue(info.get("CameraModel", ""))
             self.settings.child("camera_info", "serial").setValue(info.get("SerialNumber", ""))
 
+            # Before pixel_encoding below: which encodings are available
+            # depends on the current gain mode (e.g. "High dynamic range"
+            # drops the 12-bit-specific Mono12/Mono12Packed).
+            available_gain_modes = self.camera.enum_values("SimplePreAmpGainControl")
+            self.settings.child("gain_mode").setLimits(available_gain_modes)
+            if self.settings["gain_mode"] not in available_gain_modes:
+                self.settings.child("gain_mode").setValue(available_gain_modes[0])
+
             # Restrict to encodings this wrapper actually knows how to decode
             # (PIXEL_ENCODING_DTYPES) - in practice the same set the camera
             # reports, but this stays safe if a future camera adds one we
@@ -773,6 +801,7 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
             exposure_s=self.settings["timing", "exposure"] * 1e-3,
             frame_rate=self.settings["timing", "frame_rate"],
             trigger_mode=self.settings["trigger_mode"],
+            gain_mode=self.settings["gain_mode"],
         )
         self._sync_timing_settings()
 
@@ -913,11 +942,14 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
                     )
                     self.settings.child("timing", "set_max_frame_rate").setValue(False)
 
-            elif name in {"left", "top", "width", "height", "pixel_encoding", "n_buffers", "trigger_mode"}:
+            elif name in {
+                "left", "top", "width", "height", "pixel_encoding", "n_buffers",
+                "trigger_mode", "gain_mode",
+            }:
                 if self.running:
                     self._set_status(
                         "Stop the live acquisition before changing AOI, pixel "
-                        "encoding, buffer count, or trigger mode."
+                        "encoding, buffer count, trigger mode, or gain mode."
                     )
                     return
 
@@ -929,6 +961,23 @@ class DAQ_2DViewer_MaranaX(DAQ_Viewer_base):
 
                 if name == "n_buffers":
                     self.camera.n_buffers = n_buffers
+
+                if name == "gain_mode":
+                    # Which PixelEncodings exist depends on gain mode (e.g.
+                    # "High dynamic range" drops Mono12/Mono12Packed). Apply
+                    # the new gain mode and refresh that list *before*
+                    # _reconfigure_camera() below re-applies pixel_encoding,
+                    # so a now-invalid choice doesn't get pushed back to the
+                    # camera.
+                    self.camera.set_enum("SimplePreAmpGainControl", param.value())
+                    available_encodings = [
+                        enc
+                        for enc in self.camera.enum_values("PixelEncoding")
+                        if enc in PIXEL_ENCODING_DTYPES
+                    ]
+                    self.settings.child("pixel_encoding").setLimits(available_encodings)
+                    if self.settings["pixel_encoding"] not in available_encodings:
+                        self.settings.child("pixel_encoding").setValue(available_encodings[0])
 
                 self._reconfigure_camera()
                 self._update_memory_estimates()

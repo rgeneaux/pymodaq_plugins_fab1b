@@ -787,9 +787,20 @@ class AndorSDK3Camera:
         frame_rate=None,
         enable_metadata=False,
         trigger_mode=None,
+        gain_mode=None,
     ):
         if self.acquiring:
             raise RuntimeError("Cannot configure while acquiring")
+
+        # Before PixelEncoding below: which encodings are even available
+        # depends on this (e.g. "High dynamic range (16-bit)" drops
+        # Mono12/Mono12Packed entirely - they're 12-bit-ADC-specific). The
+        # caller is responsible for passing a pixel_encoding that's valid
+        # for the gain_mode being set here; see the base plugin's
+        # commit_settings, which re-derives the valid encoding list right
+        # after a gain mode change, before this is called.
+        if gain_mode is not None:
+            self.set_enum("SimplePreAmpGainControl", gain_mode)
 
         if pixel_encoding not in PIXEL_ENCODING_DTYPES:
             raise RuntimeError(
