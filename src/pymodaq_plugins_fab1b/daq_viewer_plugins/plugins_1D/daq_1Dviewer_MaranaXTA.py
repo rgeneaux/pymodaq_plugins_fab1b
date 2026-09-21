@@ -51,6 +51,36 @@ class DAQ_1DViewer_MaranaXTA(DAQ_2DViewer_MaranaX):
 
     params = DAQ_2DViewer_MaranaX.params + [
         {
+            "title": "TA acquisition loop:",
+            "name": "ta_control",
+            "type": "group",
+            "children": [
+                {
+                    "title": "Loop status:",
+                    "name": "loop_status",
+                    "type": "led",
+                    "value": False,
+                    "readonly": True,
+                    "tip": "Lit whenever the persistent TA acquisition loop "
+                    "(AcquisitionStart) is running. Unlike Preview/Chunked "
+                    "mode, a single Grab does NOT stop it afterwards - the "
+                    "camera keeps free-running (shots counted, pixel data "
+                    "discarded) so chopper-phase tracking survives delay-"
+                    "stage moves between chunks. Use Stop loop below to end "
+                    "it, e.g. at the end of the day.",
+                },
+                {
+                    "title": "Stop loop",
+                    "name": "stop_loop",
+                    "type": "bool_push",
+                    "value": False,
+                    "tip": "Stops the persistent acquisition loop "
+                    "(AcquisitionStop). Safe to press any time, including "
+                    "when already stopped.",
+                },
+            ],
+        },
+        {
             "title": "Pump phase:",
             "name": "pump_phase",
             "type": "group",
@@ -205,7 +235,12 @@ class DAQ_1DViewer_MaranaXTA(DAQ_2DViewer_MaranaX):
         name = param.name()
 
         try:
-            if name == "phase_state":
+            if name == "stop_loop":
+                if param.value():
+                    self.stop()
+                    self.settings.child("ta_control", "stop_loop").setValue(False)
+
+            elif name == "phase_state":
                 self._phase_offset = PHASE_LABEL_TO_OFFSET[param.value()]
 
             elif name == "calibrate_phase":
@@ -262,7 +297,20 @@ class DAQ_1DViewer_MaranaXTA(DAQ_2DViewer_MaranaX):
         self.acquisition_worker.acquisition_stopped.connect(self._acquisition_stopped)
 
         self.running = True
+        self.settings.child("ta_control", "loop_status").setValue(True)
         self.acquisition_thread.start()
+
+    @QtCore.Slot()
+    def _acquisition_stopped(self):
+        # Reached on an explicit Stop loop / DAQ_Viewer stop, and also on a
+        # worker crash (acquisition_error still flows into the same
+        # run()/finally -> acquisition_stopped path). Either way the loop
+        # is no longer draining frames, so a leftover "calibrate"/
+        # "background" pending_action would otherwise get wrongly applied
+        # to the first plain chunk after the loop is next started.
+        super()._acquisition_stopped()
+        self._pending_action = None
+        self.settings.child("ta_control", "loop_status").setValue(False)
 
     def grab_data(self, Naverage=1, **kwargs):
         if not self._is_ta_configured():
