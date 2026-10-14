@@ -517,7 +517,19 @@ class DAQ_1DViewer_MaranaXG2(DAQ_2DViewer_MaranaX):
         if result[1]:
             self._last_mode = self.settings["acquisition_mode"]
             self._apply_mode_visibility()
-            self._rebuild_area_masks()
+            # emit=False: super().ini_detector() above already emitted one
+            # dte_signal_temp (its own default placeholder image) as its
+            # very last step. A second dte_signal_temp fired synchronously
+            # in the same call chain - even a well-formed one - hits a
+            # re-entrancy bug in PyMoDAQ's own viewer teardown/rebuild
+            # (DAQ_Viewer.show_temp_data -> ... -> Viewer.remove_viewers:
+            # "IndexError: pop from empty list"), reproduced against a real
+            # Dashboard. Geometry is still built eagerly here so calibration
+            # works immediately; only the *display* of the area map is
+            # deferred to the next independent settings change (harmonics
+            # edit, mode switch, threshold/margin change, or a completed
+            # calibration), each of which emits on its own and is safe.
+            self._rebuild_area_masks(emit=False)
         return result
 
     def _harmonics_from_settings(self):
@@ -529,7 +541,7 @@ class DAQ_1DViewer_MaranaXG2(DAQ_2DViewer_MaranaX):
             for name in HARMONIC_NAMES
         ]
 
-    def _rebuild_area_masks(self):
+    def _rebuild_area_masks(self, emit=True):
         harmonics = self._harmonics_from_settings()
         overlaps = g2_analysis.harmonics_overlap(harmonics)
         if overlaps:
@@ -544,16 +556,17 @@ class DAQ_1DViewer_MaranaXG2(DAQ_2DViewer_MaranaX):
             aoi_width=self.settings["aoi", "width"],
             aoi_height=self.settings["aoi", "height"],
         )
-        self._recompute_valid_masks_and_thresholds()
+        self._recompute_valid_masks_and_thresholds(emit=emit)
 
-    def _recompute_valid_masks_and_thresholds(self):
+    def _recompute_valid_masks_and_thresholds(self, emit=True):
         if self._area_masks is None:
             return
 
         if self._calibration_std is None:
             self._valid_area_masks = None
             self._thresholds = None
-            self._emit_area_map()
+            if emit:
+                self._emit_area_map()
             return
 
         if self._calibration_shape != self._area_masks.shape[1:]:
@@ -566,7 +579,8 @@ class DAQ_1DViewer_MaranaXG2(DAQ_2DViewer_MaranaX):
                 "AOI changed since the last dark calibration; re-run "
                 "'Run dark calibration'."
             )
-            self._emit_area_map()
+            if emit:
+                self._emit_area_map()
             return
 
         std_threshold = self.settings["calibration", "std_threshold"]
@@ -594,7 +608,8 @@ class DAQ_1DViewer_MaranaXG2(DAQ_2DViewer_MaranaX):
             self.acquisition_worker.valid_area_masks = valid
             self.acquisition_worker.thresholds = thresholds
 
-        self._emit_area_map()
+        if emit:
+            self._emit_area_map()
 
     def _emit_area_map(self):
         if self._area_masks is None:
