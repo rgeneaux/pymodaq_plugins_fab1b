@@ -265,6 +265,8 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
     def ini_attributes(self):
         super().ini_attributes()
         self._pending_action = None  # None | "check" | "background"
+        # Continuous grab: each processed chunk requests the next one.
+        self._live = False
         self._background_on = None
         self._background_off = None
         self._background_tag = None
@@ -357,6 +359,7 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         # wrongly applied to the first plain chunk after the next start.
         super()._acquisition_stopped()
         self._pending_action = None
+        self._live = False
         self.settings.child("ta_control", "loop_status").setValue(False)
 
     def grab_data(self, Naverage=1, **kwargs):
@@ -376,8 +379,17 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
             return
 
         self._pending_action = None
+        self._live = bool(kwargs.get("live", False))
         self._ensure_ta_worker()
         self.acquisition_worker.request_chunk(chunk_size=chunk_size)
+
+    def stop(self):
+        self._live = False
+        super().stop()
+
+    def _request_next_live_chunk(self):
+        if self._live and self.running and self.acquisition_worker is not None:
+            self.acquisition_worker.request_chunk(chunk_size=int(self.settings["chunk_size"]))
 
     def _start_phase_check(self):
         self._ensure_ta_worker()
@@ -479,7 +491,14 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
     @QtCore.Slot(object, object)
     def _chopper_chunk_received(self, chunk, shot_times):
         self.settings.child("chopper", "shots_seen").setValue(self.acquisition_worker.shots_seen)
+        try:
+            self._process_chunk(chunk, shot_times)
+        finally:
+            # Also after a rejected chunk (no modulation found, ...): a
+            # continuous grab must keep going and show the status, not stall.
+            self._request_next_live_chunk()
 
+    def _process_chunk(self, chunk, shot_times):
         pending, self._pending_action = self._pending_action, None
 
         classified = self._classify(chunk, shot_times)
