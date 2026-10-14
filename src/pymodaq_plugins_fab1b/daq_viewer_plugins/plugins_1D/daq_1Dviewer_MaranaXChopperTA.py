@@ -342,7 +342,7 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         self.acquisition_worker.moveToThread(self.acquisition_thread)
 
         self.acquisition_thread.started.connect(self.acquisition_worker.run)
-        self.acquisition_worker.chopper_chunk_ready.connect(self._chunk_received)
+        self.acquisition_worker.chopper_chunk_ready.connect(self._chopper_chunk_received)
         self.acquisition_worker.acquisition_error.connect(self._acquisition_error)
         self.acquisition_worker.acquisition_stopped.connect(self._acquisition_stopped)
 
@@ -477,7 +477,7 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
     # --- Data handling -------------------------------------------------------
 
     @QtCore.Slot(object, object)
-    def _chunk_received(self, chunk, shot_times):
+    def _chopper_chunk_received(self, chunk, shot_times):
         self.settings.child("chopper", "shots_seen").setValue(self.acquisition_worker.shots_seen)
 
         pending, self._pending_action = self._pending_action, None
