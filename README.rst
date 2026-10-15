@@ -53,3 +53,26 @@ held by the GUI. The PyMoDAQ-facing frame has independent ownership.
 For maximum acquisition throughput, keep processing out of the Qt slot
 connected to ``frame_ready``. A future high-throughput recorder should consume
 the acquisition frames in a separate producer/consumer queue.
+
+Chopped pump-probe with a slow chopper
+--------------------------------------
+
+``DAQ_1DViewer_MaranaXChopperTA`` is for a chopper whose period spans many laser shots (e.g. 10 Hz on a 1 kHz
+laser). Each single-shot frame is classified pump-on/off from its hardware timestamp and a chopper phase fitted on
+the data (contrast of the *Reference pixels*), so the shot parity plays no role. Use it in *Chunked* mode with
+*Vertical binning*; *Measure background* (probe blocked, pump on) is subtracted per pump state.
+
+Delay Binner (chunks) extension
+-------------------------------
+
+Builds a (delay x pixel) map of dR/R or ΔOD while a delay stage oscillates: a 0D detector measuring the delay
+(fs, any plugin giving a timestamped 0D value) and the ``MaranaXChopperTA`` viewer run independently, and every
+shot of every chunk is binned at the delay interpolated at its own time, in a pump-on or pump-off average. The
+chunk-averaged observable cannot be used because the stage keeps sweeping while a chunk is acquired. The extension
+switches on the viewer's *Output single shots* setting while it acquires (see ``chopper_shots.py``); *Create
+Viewer* adds a 2D viewer module giving the map (snap during *Snap duration*, or continuous grab).
+
+The extension targets PyMoDAQ 5.2. After adding it, reinstall once (``pip install -e .``) so that PyMoDAQ finds
+the ``pymodaq.extensions`` entry point. Things to set: *History* must be longer than one chunk, *Latency* is the
+delay between a delay measurement and the timestamp of its data, *Max gap* the longest hole in the delay
+measurements across which shots are still given a delay.

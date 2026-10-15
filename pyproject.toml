@@ -1,6 +1,6 @@
 [features]
 instruments = true
-extensions = false
+extensions = true
 models = false
 h5exporters = false
 scanners = false
@@ -12,10 +12,10 @@ package-url = "https://github.com/yourname/pymodaq_plugins_maranax"
 name = "pymodaq_plugins_fab1b"
 description = "PyMoDAQ 5.2 plugin for Andor Marana-X cameras using native Andor SDK3"
 dependencies = [
-    "pymodaq>=5.2.0,<5.3.0",
-    "pymodaq_utils>=5.2.0,<5.3.0",
-    "pymodaq_gui>=5.2.0,<5.3.0",
-    "pymodaq_data>=5.2.0,<5.3.0",
+    "pymodaq>=5.2.0,<5.4.0",
+    "pymodaq_utils>=5.2.0,<5.4.0",
+    "pymodaq_gui>=5.2.0,<5.4.0",
+    "pymodaq_data>=5.2.0,<5.4.0",
     "numpy>=1.23",
     "pyserial>=3.5",
 ]

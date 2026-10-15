@@ -10,6 +10,7 @@ from pymodaq.control_modules.viewer_utility_classes import main
 from pymodaq.utils.data import Axis, DataFromPlugins
 from pymodaq_data.data import DataToExport
 
+from pymodaq_plugins_fab1b.chopper_shots import SHOTS_NAME, STATE_NAME, TIMES_NAME
 from pymodaq_plugins_fab1b.daq_viewer_plugins.plugins_2D.daq_2Dviewer_MaranaX import (
     DAQ_2DViewer_MaranaX,
     MaranaXAcquisitionWorker,
@@ -30,8 +31,9 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
     simply shows up as a gap in the timestamps and costs nothing.
     """
 
-    # (n_shots, width) vertically-binned shots, per-shot hardware timestamps (s)
-    chopper_chunk_ready = QtCore.Signal(object, object)
+    # (n_shots, width) vertically-binned shots, per-shot camera hardware timestamps (s, arbitrary
+    # origin) and per-shot host arrival times (s, epoch)
+    chopper_chunk_ready = QtCore.Signal(object, object, object)
     # (shots acquired so far, chunk size); (0, 0) = no chunk in progress
     chunk_progress = QtCore.Signal(int, int)
 
@@ -56,6 +58,7 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
 
         chunk = None
         chunk_ts = None
+        chunk_host = None
         filled = 0
         chunk_size = 0
         last_progress = 0.0
@@ -67,17 +70,21 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
                 self._finish_event.clear()
                 if self._accumulate_event.is_set():
                     if chunk is not None and filled > 0:
-                        self.chopper_chunk_ready.emit(chunk[:filled], chunk_ts[:filled])
+                        self.chopper_chunk_ready.emit(
+                            chunk[:filled], chunk_ts[:filled], chunk_host[:filled]
+                        )
                     else:
                         self.chunk_progress.emit(0, 0)
                     self._accumulate_event.clear()
                     chunk = None
                     chunk_ts = None
+                    chunk_host = None
 
             result = self.camera.wait_frame(timeout_ms=100)
             if result is None:
                 continue
 
+            t_arrival = time.time()
             buffer, size = result
             try:
                 self.shots_seen += 1
@@ -92,11 +99,13 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
                     chunk_size = self._requested_chunk_size or self.chunk_size
                     chunk = np.empty((chunk_size, width), dtype=self._sum_dtype)
                     chunk_ts = np.empty(chunk_size, dtype=np.float64)
+                    chunk_host = np.empty(chunk_size, dtype=np.float64)
                     filled = 0
 
                 view = self.camera.frame_view(buffer)
                 chunk[filled] = view.sum(axis=0, dtype=self._sum_dtype)
                 chunk_ts[filled] = self.camera.frame_timestamp(buffer, size) / ts_freq
+                chunk_host[filled] = t_arrival
                 filled += 1
 
                 now = time.monotonic()
@@ -105,10 +114,11 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
                     self.chunk_progress.emit(filled, chunk_size)
 
                 if filled >= chunk_size:
-                    self.chopper_chunk_ready.emit(chunk, chunk_ts)
+                    self.chopper_chunk_ready.emit(chunk, chunk_ts, chunk_host)
                     self._accumulate_event.clear()
                     chunk = None
                     chunk_ts = None
+                    chunk_host = None
             finally:
                 self.camera.requeue(buffer)
 
@@ -219,6 +229,19 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
                             "chopper cycle is called ON.",
                         },
                     ],
+                },
+                {
+                    "title": "Output single shots:",
+                    "name": "output_shots",
+                    "type": "bool",
+                    "value": False,
+                    "tip": "Also output, with each chunk, every classified shot "
+                    "(background-subtracted) with its own time and pump state, "
+                    "in addition to the chunk-averaged observable. The Delay "
+                    "Binner extension switches it on by itself: it needs each "
+                    "shot to bin it at its own delay. Leave it off otherwise "
+                    "(the shot matrix is large and shows up in the viewer and "
+                    "in saved data).",
                 },
                 {
                     "title": "Chunk progress:",
@@ -527,10 +550,11 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         return best_phase, best_z
 
     def _classify(self, chunk, shot_times):
-        """Split a chunk into pump-on / pump-off shots by fitted chopper phase.
+        """Classify the shots of a chunk as pump-on / pump-off by fitted chopper phase.
 
-        Returns ``(on_shots, off_shots)``, or ``None`` when the chunk can't be
-        classified (the status line says why).
+        Returns ``(on, off)`` boolean shot masks (shots in the edge guard are
+        in neither), or ``None`` when the chunk can't be classified (the
+        status line says why).
         """
         period_s = 1.0 / float(self.settings["chopper", "freq"])
         guard_s = self.settings["chopper", "edge_guard"] * 1e-3
@@ -569,28 +593,29 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
                 f"reference pixels off the pump signature? Chunk discarded."
             )
             return None
-        return chunk[on], chunk[off]
+        return on, off
 
     # --- Data handling -------------------------------------------------------
 
-    @QtCore.Slot(object, object)
-    def _chopper_chunk_received(self, chunk, shot_times):
+    @QtCore.Slot(object, object, object)
+    def _chopper_chunk_received(self, chunk, shot_times, host_times):
         self.settings.child("chopper", "shots_seen").setValue(self.acquisition_worker.shots_seen)
         self.settings.child("chopper", "progress").setValue(f"done ({len(chunk)} shots)")
         accepted = False
         try:
-            accepted = self._process_chunk(chunk, shot_times)
+            accepted = self._process_chunk(chunk, shot_times, host_times)
         finally:
             self._request_next_chunk(retry=not accepted)
 
-    def _process_chunk(self, chunk, shot_times):
+    def _process_chunk(self, chunk, shot_times, host_times):
         """Classify and emit one chunk; False if it was rejected."""
         pending, self._pending_action = self._pending_action, None
 
-        classified = self._classify(chunk, shot_times)
-        if classified is None:
+        masks = self._classify(chunk, shot_times)
+        if masks is None:
             return False
-        on_shots, off_shots = classified
+        on, off = masks
+        on_shots, off_shots = chunk[on], chunk[off]
         mean_on = on_shots.mean(axis=0)
         mean_off = off_shots.mean(axis=0)
 
@@ -599,7 +624,8 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         elif pending == "background":
             self._store_background(mean_on, mean_off, len(on_shots), len(off_shots))
         else:
-            self._emit_observable(mean_on, mean_off)
+            shots = (chunk, shot_times, host_times, on, off) if self.settings["chopper", "output_shots"] else None
+            self._emit_observable(mean_on, mean_off, shots)
         return True
 
     def _emit_check(self, mean_on, mean_off, n_on, n_off):
@@ -666,16 +692,56 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
             and self._background_tag != self._background_tag_current()
         )
 
-    def _emit_observable(self, mean_on, mean_off):
+    def _active_background(self):
+        """(background_on, background_off) to subtract, or None."""
         if self._background_on is not None and not self._background_stale():
-            on_corr = mean_on - self._background_on
-            off_corr = mean_off - self._background_off
+            return self._background_on, self._background_off
+        if self._background_tag is not None:
+            self._set_status(
+                "Stored background no longer matches the current AOI/exposure/"
+                "encoding; not subtracting it. Re-run 'Measure background'."
+            )
+        return None
+
+    def _shot_channels(self, chunk, cam_times, host_times, on, off, background):
+        """Single-shot channels (see :mod:`pymodaq_plugins_fab1b.chopper_shots`)."""
+        keep = on | off
+        is_on = on[keep]
+        spectra = chunk[keep].astype(np.float32)
+        if background is not None:
+            spectra -= np.where(is_on[:, None], background[0], background[1]).astype(np.float32)
+        # Camera clock -> host wall clock. The offset is the median over the
+        # chunk of (host arrival - camera timestamp): it rejects the per-frame
+        # jitter of the host side, and is biased only by the constant
+        # exposure + readout + transfer latency (milliseconds).
+        offset = float(np.median(np.asarray(host_times) - np.asarray(cam_times)))
+        times = np.asarray(cam_times)[keep] + offset
+        n_shots, width = spectra.shape
+        shot_axis = Axis(label="shot", units="", data=np.arange(n_shots), index=0)
+        x_axis = Axis(label="x", units="px", data=np.arange(width), index=1)
+        shot_index_axis = Axis(label="shot", units="", data=np.arange(n_shots), index=0)
+        return [
+            DataFromPlugins(
+                name=SHOTS_NAME, data=[spectra], dim="Data2D", labels=["shots"], axes=[shot_axis, x_axis]
+            ),
+            DataFromPlugins(
+                name=TIMES_NAME, data=[times], dim="Data1D", labels=["time"], axes=[shot_index_axis]
+            ),
+            DataFromPlugins(
+                name=STATE_NAME,
+                data=[is_on.astype(np.float64)],
+                dim="Data1D",
+                labels=["state"],
+                axes=[shot_index_axis],
+            ),
+        ]
+
+    def _emit_observable(self, mean_on, mean_off, shots=None):
+        background = self._active_background()
+        if background is not None:
+            on_corr = mean_on - background[0]
+            off_corr = mean_off - background[1]
         else:
-            if self._background_tag is not None:
-                self._set_status(
-                    "Stored background no longer matches the current AOI/exposure/"
-                    "encoding; not subtracting it. Re-run 'Measure background'."
-                )
             on_corr = mean_on
             off_corr = mean_off
 
@@ -704,6 +770,9 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
                 DataFromPlugins(name=name, data=[result], dim="Data1D", axes=[x_axis]),
                 on_off_channel,
             ]
+
+        if shots is not None:
+            data = data + self._shot_channels(*shots, background)
 
         self.dte_signal.emit(DataToExport("Marana-X chopper TA", data=data))
 
