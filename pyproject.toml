@@ -17,6 +17,7 @@ dependencies = [
     "pymodaq_gui>=5.2.0,<5.4.0",
     "pymodaq_data>=5.2.0,<5.4.0",
     "numpy>=1.23",
+    "pymodaq_plugins_physik_instrumente>=5.3.0",  # DAQ_Move_PI_Waveform extends its DAQ_Move_PI
     "pyserial>=3.5",
 ]
 authors = [
