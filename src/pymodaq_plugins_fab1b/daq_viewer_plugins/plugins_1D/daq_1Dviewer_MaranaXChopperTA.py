@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 from qtpy import QtCore
 
@@ -29,6 +32,10 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
 
     # (n_shots, width) vertically-binned shots, per-shot hardware timestamps (s)
     chopper_chunk_ready = QtCore.Signal(object, object)
+    # (shots acquired so far, chunk size); (0, 0) = no chunk in progress
+    chunk_progress = QtCore.Signal(int, int)
+
+    PROGRESS_INTERVAL_S = 0.25
 
     def __init__(self, camera, chunk_size=None):
         super().__init__(
@@ -37,6 +44,11 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
             vertical_binning=True,
             ta_continuous=True,
         )
+        self._finish_event = threading.Event()
+
+    def finish_chunk(self):
+        """Emit the shots acquired so far as the current chunk, right now."""
+        self._finish_event.set()
 
     def _run_ta_continuous(self):
         width = self.camera.width
@@ -46,8 +58,22 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
         chunk_ts = None
         filled = 0
         chunk_size = 0
+        last_progress = 0.0
 
         while not self._stop_event.is_set():
+            # Checked before waiting for a frame so a finish request is
+            # honoured even when no frame is arriving (e.g. no trigger).
+            if self._finish_event.is_set():
+                self._finish_event.clear()
+                if self._accumulate_event.is_set():
+                    if chunk is not None and filled > 0:
+                        self.chopper_chunk_ready.emit(chunk[:filled], chunk_ts[:filled])
+                    else:
+                        self.chunk_progress.emit(0, 0)
+                    self._accumulate_event.clear()
+                    chunk = None
+                    chunk_ts = None
+
             result = self.camera.wait_frame(timeout_ms=100)
             if result is None:
                 continue
@@ -72,6 +98,11 @@ class MaranaXChopperWorker(MaranaXAcquisitionWorker):
                 chunk[filled] = view.sum(axis=0, dtype=self._sum_dtype)
                 chunk_ts[filled] = self.camera.frame_timestamp(buffer, size) / ts_freq
                 filled += 1
+
+                now = time.monotonic()
+                if now - last_progress >= self.PROGRESS_INTERVAL_S:
+                    last_progress = now
+                    self.chunk_progress.emit(filled, chunk_size)
 
                 if filled >= chunk_size:
                     self.chopper_chunk_ready.emit(chunk, chunk_ts)
@@ -190,6 +221,26 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
                     ],
                 },
                 {
+                    "title": "Chunk progress:",
+                    "name": "progress",
+                    "type": "str",
+                    "value": "-",
+                    "readonly": True,
+                    "tip": "Shots acquired in the chunk being filled, with an "
+                    "estimated time left. A large Chunk size at a low shot "
+                    "rate can take minutes.",
+                },
+                {
+                    "title": "Finish chunk now",
+                    "name": "finish_chunk",
+                    "type": "bool_push",
+                    "value": False,
+                    "tip": "Stop waiting: process the shots acquired so far "
+                    "as this chunk (it must still span at least two chopper "
+                    "periods). The loop keeps running. To end it, use the "
+                    "viewer's stop button or Stop loop.",
+                },
+                {
                     "title": "Check chopper phase",
                     "name": "check_phase",
                     "type": "bool_push",
@@ -265,6 +316,7 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
     def ini_attributes(self):
         super().ini_attributes()
         self._pending_action = None  # None | "check" | "background"
+        self._chunk_t0 = time.monotonic()
         # Continuous grab: each processed chunk requests the next one.
         self._live = False
         self._background_on = None
@@ -301,6 +353,12 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
                 if param.value():
                     self.stop()
                     self.settings.child("ta_control", "stop_loop").setValue(False)
+
+            elif name == "finish_chunk":
+                if param.value():
+                    if self.running and self.acquisition_worker is not None:
+                        self.acquisition_worker.finish_chunk()
+                    self.settings.child("chopper", "finish_chunk").setValue(False)
 
             elif name == "check_phase":
                 if param.value():
@@ -345,6 +403,7 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
 
         self.acquisition_thread.started.connect(self.acquisition_worker.run)
         self.acquisition_worker.chopper_chunk_ready.connect(self._chopper_chunk_received)
+        self.acquisition_worker.chunk_progress.connect(self._chunk_progress)
         self.acquisition_worker.acquisition_error.connect(self._acquisition_error)
         self.acquisition_worker.acquisition_stopped.connect(self._acquisition_stopped)
 
@@ -381,25 +440,45 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         self._pending_action = None
         self._live = bool(kwargs.get("live", False))
         self._ensure_ta_worker()
-        self.acquisition_worker.request_chunk(chunk_size=chunk_size)
+        self._request_chunk(chunk_size)
 
     def stop(self):
         self._live = False
         super().stop()
 
-    def _request_next_live_chunk(self):
-        if self._live and self.running and self.acquisition_worker is not None:
-            self.acquisition_worker.request_chunk(chunk_size=int(self.settings["chunk_size"]))
+    def _request_chunk(self, chunk_size):
+        self._chunk_t0 = time.monotonic()
+        self.acquisition_worker.request_chunk(chunk_size=chunk_size)
+
+    def _request_next_chunk(self, retry):
+        """Re-request a chunk: always after a rejected one (so a scan point
+        keeps trying instead of waiting forever for data that never comes),
+        after a good one only in a continuous grab."""
+        if (self._live or retry) and self.running and self.acquisition_worker is not None:
+            self._request_chunk(int(self.settings["chunk_size"]))
+
+    @QtCore.Slot(int, int)
+    def _chunk_progress(self, done, total):
+        if total <= 0:
+            self.settings.child("chopper", "progress").setValue("-")
+            self._set_status("Nothing to finish: no shots acquired yet (is the camera triggered?).")
+            return
+        elapsed = time.monotonic() - self._chunk_t0
+        text = f"{done} / {total} shots ({100.0 * done / total:.0f} %)"
+        if done > 0 and elapsed > 0.5:
+            left = elapsed * (total - done) / done
+            text += f", ~{left:.0f} s left" if left < 120 else f", ~{left / 60:.1f} min left"
+        self.settings.child("chopper", "progress").setValue(text)
 
     def _start_phase_check(self):
         self._ensure_ta_worker()
         self._pending_action = "check"
-        self.acquisition_worker.request_chunk(chunk_size=int(self.settings["chunk_size"]))
+        self._request_chunk(int(self.settings["chunk_size"]))
 
     def _start_background_measurement(self):
         self._ensure_ta_worker()
         self._pending_action = "background"
-        self.acquisition_worker.request_chunk(chunk_size=int(self.settings["chunk_size"]))
+        self._request_chunk(int(self.settings["chunk_size"]))
 
     def _clear_background(self):
         self._background_on = None
@@ -473,6 +552,12 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         ref = chunk[:, a:b].astype(np.float64).mean(axis=1)
         bright_is_on = self.settings["chopper", "ref_pixels", "polarity"] == "ON"
         phase_s, z = self._fit_chopper_phase(ref, t_s, period_s, guard_s, bright_is_on)
+        if not np.isfinite(z):
+            self._set_status(
+                f"Too few shots ({len(t_s)}) to fit the chopper phase: increase "
+                f"Chunk size or the shot rate. Chunk discarded."
+            )
+            return None
         on, off = self._chopper_masks(t_s, phase_s, period_s, guard_s)
         self.settings.child("chopper", "fit_result").setValue(
             f"start {phase_s * 1e3:.1f} ms, z={z:.1f}, {int(on.sum())} on / {int(off.sum())} off"
@@ -491,19 +576,20 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
     @QtCore.Slot(object, object)
     def _chopper_chunk_received(self, chunk, shot_times):
         self.settings.child("chopper", "shots_seen").setValue(self.acquisition_worker.shots_seen)
+        self.settings.child("chopper", "progress").setValue(f"done ({len(chunk)} shots)")
+        accepted = False
         try:
-            self._process_chunk(chunk, shot_times)
+            accepted = self._process_chunk(chunk, shot_times)
         finally:
-            # Also after a rejected chunk (no modulation found, ...): a
-            # continuous grab must keep going and show the status, not stall.
-            self._request_next_live_chunk()
+            self._request_next_chunk(retry=not accepted)
 
     def _process_chunk(self, chunk, shot_times):
+        """Classify and emit one chunk; False if it was rejected."""
         pending, self._pending_action = self._pending_action, None
 
         classified = self._classify(chunk, shot_times)
         if classified is None:
-            return
+            return False
         on_shots, off_shots = classified
         mean_on = on_shots.mean(axis=0)
         mean_off = off_shots.mean(axis=0)
@@ -511,9 +597,10 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
         if pending == "check":
             self._emit_check(mean_on, mean_off, len(on_shots), len(off_shots))
         elif pending == "background":
-            self._store_background(mean_on, mean_off)
+            self._store_background(mean_on, mean_off, len(on_shots), len(off_shots))
         else:
             self._emit_observable(mean_on, mean_off)
+        return True
 
     def _emit_check(self, mean_on, mean_off, n_on, n_off):
         x_axis = Axis(label="x", units="px", data=np.arange(mean_on.shape[0]), index=0)
@@ -544,12 +631,33 @@ class DAQ_1DViewer_MaranaXChopperTA(DAQ_2DViewer_MaranaX):
             self.settings["pixel_encoding"],
         )
 
-    def _store_background(self, mean_on, mean_off):
+    def _store_background(self, mean_on, mean_off, n_on, n_off):
         self._background_on = mean_on
         self._background_off = mean_off
         self._background_tag = self._background_tag_current()
+        stamp = time.strftime("%H:%M:%S")
         self.settings.child("background", "background_status").setValue(
-            f"Captured ({mean_on.shape[0]} px, {int(self.settings['chunk_size'])} shots)"
+            f"Measured at {stamp} ({n_on} on / {n_off} off shots)"
+        )
+        self._set_status(
+            f"Background measured at {stamp} ({n_on} on / {n_off} off shots); "
+            f"it is now subtracted from the data."
+        )
+        # Show the stored traces so the measurement is visible on the plot too.
+        x_axis = Axis(label="x", units="px", data=np.arange(mean_on.shape[0]), index=0)
+        self.dte_signal_temp.emit(
+            DataToExport(
+                "Marana-X chopper TA",
+                data=[
+                    DataFromPlugins(
+                        name="Background (measured)",
+                        data=[mean_on, mean_off],
+                        dim="Data1D",
+                        labels=["Background pump on", "Background pump off"],
+                        axes=[x_axis],
+                    ),
+                ],
+            )
         )
 
     def _background_stale(self):
